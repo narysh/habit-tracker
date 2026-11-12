@@ -1,0 +1,8 @@
+.git
+.gradle
+.tools
+.local
+.env
+local.properties
+**/build
+**/.idea

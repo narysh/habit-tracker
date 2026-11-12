@@ -1,0 +1,40 @@
+name: habit-tracker
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_DB: habit_tracker
+      POSTGRES_USER: habit_tracker
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U habit_tracker -d habit_tracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      JDBC_URL: jdbc:postgresql://postgres:5432/habit_tracker
+      DB_USER: habit_tracker
+      DB_PASSWORD: ${DB_PASSWORD}
+      MCP_CLIENT_ID: habit-tracker
+      MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET:?Set MCP_CLIENT_SECRET in .env}
+      MCP_REDIRECT_URIS: ${MCP_REDIRECT_URIS:-http://127.0.0.1:45838/callback}
+      PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:8081}
+      FILES_DIR: /data/files
+    ports:
+      - "8081:8081"
+    volumes:
+      - attachment-data:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres-data:
+  attachment-data:
