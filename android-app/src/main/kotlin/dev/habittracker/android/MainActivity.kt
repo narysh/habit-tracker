@@ -29,6 +29,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.habittracker.shared.*
 import java.time.*
@@ -59,6 +63,12 @@ private fun Content.description(): String = when(this) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun TrackerApp(vm: AppViewModel=viewModel()) {
     val session by vm.session.collectAsStateWithLifecycle()
+    val lifecycle=LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle,session?.userId) {
+        if(session!=null) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while(true) { vm.refreshFromServer(); delay(10_000) }
+        }
+    }
     val records by vm.items.collectAsStateWithLifecycle()
     val conflicts by vm.conflicts.collectAsStateWithLifecycle()
     val files by vm.files.collectAsStateWithLifecycle()

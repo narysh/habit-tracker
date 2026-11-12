@@ -50,6 +50,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         catch(e: java.io.IOException) { message.value=e.message ?: "Нет сети. Изменения сохранены на телефоне." }
         finally { busy.value=false }
     }
+    suspend fun refreshFromServer() = withContext(Dispatchers.IO) {
+        try { repository.value?.synchronize() }
+        catch (_: java.io.IOException) { /* Offline edits stay in the persistent outbox. */ }
+    }
     fun save(content: Content,id: String=UUID.randomUUID().toString(),after: ()->Unit = {}) = action {
         repository.value!!.save(content,id)
         withContext(Dispatchers.Main) { after() }
