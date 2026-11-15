@@ -8,6 +8,11 @@ import java.time.temporal.TemporalAdjusters
 import java.util.UUID
 
 val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDiscriminator = "kind" }
+@Serializable data class SocialProviderInfo(val id: String,val title: String,val enabled: Boolean,val linked: Boolean = false)
+@Serializable data class SocialStart(val provider: String,val challenge: String,val link: Boolean = false)
+@Serializable data class SocialAttempt(val id: String,val authorizationUrl: String)
+@Serializable data class SocialPoll(val id: String,val verifier: String)
+@Serializable data class SocialResult(val status: String,val session: Session? = null,val message: String? = null)
 
 @Serializable sealed interface Content { val title: String }
 @Serializable @SerialName("task") data class TaskContent(

@@ -28,6 +28,13 @@ services:
       MCP_REDIRECT_URIS: ${MCP_REDIRECT_URIS:-http://127.0.0.1:45838/callback}
       PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:8081}
       FILES_DIR: /data/files
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      VK_CLIENT_ID: ${VK_CLIENT_ID:-}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      SOCIAL_CALLBACK_BASE: ${SOCIAL_CALLBACK_BASE:-https://narysh.github.io/habit-tracker}
+      ANDROID_PUBLIC_URL: ${ANDROID_PUBLIC_URL:-}
     ports:
       - "8081:8081"
     volumes:

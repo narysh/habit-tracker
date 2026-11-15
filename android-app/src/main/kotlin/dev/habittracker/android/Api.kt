@@ -43,6 +43,8 @@ class SessionPreferences(context: Context) {
         save(session,baseUrl,storageKey())
     }
     fun url(): String = prefs.getString("url",if(android.os.Build.PRODUCT.contains("sdk")) "http://10.0.2.2:8081" else "")!!
+    fun automatic(): Boolean = prefs.getBoolean("automatic",!android.os.Build.PRODUCT.contains("sdk"))
+    fun automatic(enabled: Boolean) { check(prefs.edit().putBoolean("automatic",enabled).commit()) }
     fun clear() { prefs.edit().remove("session").commit() }
 }
 class NetworkFailure(val status: Int,message: String) : java.io.IOException(message)

@@ -48,10 +48,35 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             }
         } }
         if (user == null) { Passwords.hash(credentials.password); return null }
-        if (!Passwords.verify(credentials.password,user.third)) return null
+        if (user.third == null || !Passwords.verify(credentials.password,user.third)) return null
         return Identity(user.first,user.second,setOf("tracker:read","tracker:write"))
     }
     fun login(credentials: Credentials): Session = newSession(checkPassword(credentials) ?: throw ApiFailure(401,"Неверный email или пароль"))
+    fun linkedProviders(userId: String): Set<String> = pool.connection.use { c ->
+        c.prepareStatement("SELECT provider FROM social_identities WHERE user_id=?::uuid").use { p ->
+            p.setString(1,userId); p.executeQuery().use { r -> buildSet { while(r.next()) add(r.getString(1)) } }
+        }
+    }
+    fun socialIdentity(provider: String,subject: String,email: String?,linkUser: String?): Identity = tx { c ->
+        require(provider in setOf("google","vk","yandex") && subject.isNotBlank() && subject.length<=512)
+        c.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))").use { it.setString(1,"social:$provider:$subject");it.execute() }
+        val existing=c.prepareStatement("SELECT user_id FROM social_identities WHERE provider=? AND subject=?").use { p -> p.setString(1,provider);p.setString(2,subject);p.executeQuery().use { if(it.next()) it.getString(1) else null } }
+        if(existing!=null && linkUser!=null && existing!=linkUser) throw ApiFailure(409,"Этот способ входа уже привязан к другому аккаунту")
+        val id=existing ?: linkUser ?: UUID.randomUUID().toString()
+        if(existing==null) {
+            if(linkUser==null) {
+                val address=email?.trim()?.lowercase()?.takeIf { it.length<=254 && Regex("[^\\s@]+@[^\\s@]+\\.[^\\s@]+").matches(it) } ?: "$provider-${digest(subject).take(32)}@identity.invalid"
+                val taken=c.prepareStatement("SELECT 1 FROM users WHERE email=?").use { p -> p.setString(1,address);p.executeQuery().use {it.next()} }
+                if(taken) throw ApiFailure(409,"Аккаунт с этой почтой уже существует. Войди прежним способом и привяжи провайдера в настройках.")
+                c.prepareStatement("INSERT INTO users(id,email,password_hash) VALUES (?::uuid,?,NULL)").use {p->p.setString(1,id);p.setString(2,address);p.executeUpdate()}
+            }
+            val linked=c.prepareStatement("SELECT 1 FROM social_identities WHERE user_id=?::uuid AND provider=?").use {p->p.setString(1,id);p.setString(2,provider);p.executeQuery().use {it.next()}}
+            if(linked) throw ApiFailure(409,"Другой профиль этого провайдера уже привязан")
+            c.prepareStatement("INSERT INTO social_identities VALUES (?,?,?::uuid)").use {p->p.setString(1,provider);p.setString(2,subject);p.setString(3,id);p.executeUpdate()}
+        }
+        val address=c.prepareStatement("SELECT email FROM users WHERE id=?::uuid").use {p->p.setString(1,id);p.executeQuery().use {check(it.next());it.getString(1)}}
+        Identity(id,address,setOf("tracker:read","tracker:write"))
+    }
     fun newSession(identity: Identity, hours: Long = 24 * 30): Session {
         val token = secret(); val expiry = Instant.now().plusSeconds(hours * 3600)
         tx { c -> c.prepareStatement("INSERT INTO sessions VALUES (?,?::uuid,?,?)").use {

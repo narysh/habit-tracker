@@ -160,7 +160,16 @@ class HabitApplication : android.app.Application() {
 }
 class SyncWorker(context: Context,params: WorkerParameters) : CoroutineWorker(context,params) {
     override suspend fun doWork(): Result = try {
-        (applicationContext as HabitApplication).repository()?.synchronize(); Result.success()
+        val app=applicationContext as HabitApplication
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if(app.preferences.automatic()) {
+                val url=ServerDiscovery(app).resolve()
+                val session=app.preferences.current()
+                if(session!=null && app.preferences.url()!=url) app.preferences.save(session,url,app.preferences.storageKey())
+            }
+            app.repository()?.synchronize()
+        }
+        Result.success()
     } catch(e: NetworkFailure) { if(e.status==401) Result.failure() else Result.retry() }
       catch(_: java.io.IOException) { Result.retry() }
       catch(_: IllegalArgumentException) { Result.failure() }

@@ -69,8 +69,8 @@ private fun Content.description(): String = when(this) {
     val session by vm.session.collectAsStateWithLifecycle()
     val lifecycle=LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle,session?.userId) {
-        if(session!=null) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while(true) { vm.refreshFromServer(); delay(10_000) }
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while(true) { if(session!=null) vm.refreshFromServer() else vm.findServer(); delay(10_000) }
         }
     }
     val records by vm.items.collectAsStateWithLifecycle()
@@ -86,6 +86,7 @@ private fun Content.description(): String = when(this) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var settings by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
+    var socialSettings by remember { mutableStateOf(false) }
     var editor by remember { mutableStateOf<Pair<String,Content>?>(null) }
     var deleting by remember { mutableStateOf<Item?>(null) }
     var history by remember { mutableStateOf<Item?>(null) }
@@ -158,36 +159,62 @@ private fun Content.description(): String = when(this) {
     editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null}) }
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
+    if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
     if(connection) ConnectionDialog(vm) { connection=false }
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
     var url by remember { mutableStateOf(vm.app.preferences.url()) }
+    var automatic by remember { mutableStateOf(vm.app.preferences.automatic()) }
     var password by remember { mutableStateOf("") }
     val busy by vm.busy.collectAsStateWithLifecycle()
     AlertDialog(onDismissRequest={if(!busy) onClose()},title={Text("Подключение к серверу")},text={
         Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            Text("Укажи HTTPS-адрес того же сервера и подтверди вход. Задачи, файлы и неотправленные изменения останутся на телефоне.")
+            Row(verticalAlignment=Alignment.CenterVertically) { Switch(automatic,{automatic=it}); Text("Подключаться автоматически") }
+            Text("Автоматическое подключение проверяет подлинность нашего сервера и сохраняет локальные данные. Для собственного сервера можно указать адрес вручную.")
             Text(session?.email.orEmpty())
-            OutlinedTextField(url,{url=it},label={Text("Адрес сервера")},singleLine=true,modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(password,{password=it},label={Text("Пароль аккаунта")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+            if(!automatic) OutlinedTextField(url,{url=it},label={Text("Адрес сервера")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            if(!automatic) OutlinedTextField(password,{password=it},label={Text("Пароль аккаунта")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
             Text("При бесплатном туннеле адрес может меняться. Компьютер и сервер должны быть включены.",style=MaterialTheme.typography.bodySmall)
             if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         }
-    },confirmButton={TextButton(enabled=!busy && password.isNotBlank() && url.isNotBlank(),onClick={vm.changeServer(url,password,onClose)}) {Text("Подключить")}},dismissButton={TextButton(enabled=!busy,onClick=onClose){Text("Отмена")}})
+    },confirmButton={TextButton(enabled=!busy && (automatic || (password.isNotBlank() && url.isNotBlank())),onClick={if(automatic){vm.automaticConnection(true);onClose()}else vm.changeServer(url,password,onClose)}) {Text("Подключить")}},dismissButton={TextButton(enabled=!busy,onClick=onClose){Text("Отмена")}})
+}
+@Composable private fun SocialButtons(vm: AppViewModel,link: Boolean) {
+    val providers by vm.providers.collectAsStateWithLifecycle()
+    val pending by vm.socialBusy.collectAsStateWithLifecycle()
+    val entries=providers.ifEmpty { listOf(SocialProviderInfo("google","Google",false),SocialProviderInfo("vk","VK",false),SocialProviderInfo("yandex","Яндекс",false)) }
+    entries.forEach { provider ->
+        OutlinedButton(onClick={vm.socialLogin(provider.id,link)},enabled=provider.enabled && !provider.linked && !pending,modifier=Modifier.fillMaxWidth()) {
+            Text(if(provider.linked) "${provider.title} — привязан" else if(!provider.enabled) "${provider.title} — требуется настройка сервера" else "${if(link) "Привязать" else "Войти через"} ${provider.title}")
+        }
+    }
+    if(pending) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Заверши вход у провайдера и вернись сюда."); TextButton(onClick={vm.cancelSocialLogin()}){Text("Отменить вход")} }
+}
+@Composable private fun SocialAccountDialog(vm: AppViewModel,onClose: ()->Unit) {
+    AlertDialog(onDismissRequest=onClose,title={Text("Способы входа")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+        Text("Привязка добавляет способ входа к текущему аккаунту. Данные останутся общими.")
+        SocialButtons(vm,true)
+    }},confirmButton={TextButton(onClick=onClose){Text("Готово")}})
 }
 @Composable private fun LoginScreen(vm: AppViewModel,modifier: Modifier) {
     var email by rememberSaveable { mutableStateOf("") }; var password by remember { mutableStateOf("") }
     var url by rememberSaveable { mutableStateOf(vm.app.preferences.url()) }; var register by rememberSaveable { mutableStateOf(false) }
     val busy by vm.busy.collectAsStateWithLifecycle()
+    val connectedUrl by vm.serverUrl.collectAsStateWithLifecycle()
+    var advanced by rememberSaveable { mutableStateOf(!vm.app.preferences.automatic()) }
+    LaunchedEffect(connectedUrl) { if(!advanced) url=connectedUrl }
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(28.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
         Spacer(Modifier.height(42.dp)); Text("Habit Tracker",style=MaterialTheme.typography.headlineLarge,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
         Text("Задачи, заметки и привычки",style=MaterialTheme.typography.titleLarge)
         Text(if(register) "Создай свой аккаунт" else "Войди, чтобы синхронизировать данные")
         OutlinedTextField(email,{email=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth())
         OutlinedTextField(password,{password=it},label={Text("Пароль${if(register) " — от 10 символов" else ""}")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
-        OutlinedTextField(url,{url=it},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
+        SocialButtons(vm,false)
+        TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }
+        if(advanced) OutlinedTextField(url,{url=it;vm.manualAddress(it)},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
+        else Text(if(url.isBlank()) "Ищем сервер…" else "Сервер подключён автоматически",style=MaterialTheme.typography.bodySmall)
         Button(onClick={vm.login(url,email,password,register)},enabled=!busy && email.isNotBlank() && password.isNotBlank(),modifier=Modifier.fillMaxWidth().height(52.dp)) { Text(if(busy) "Подключение…" else if(register) "Создать аккаунт" else "Войти") }
         TextButton(onClick={register=!register}) {Text(if(register) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться")}
         Text("В первой версии email используется как логин. Подтверждение почты и восстановление пароля пока недоступны.",style=MaterialTheme.typography.bodySmall)

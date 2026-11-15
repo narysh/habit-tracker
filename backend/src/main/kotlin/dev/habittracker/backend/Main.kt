@@ -33,6 +33,8 @@ fun main() {
 fun Application.backendModule(settings: Settings, store: Store) {
     val logger = environment.log
     val oauth = AccountOAuth(settings,store)
+    val social = SocialLogin(store)
+    val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"))
     val throttle = LoginThrottle()
     Files.createDirectories(settings.files)
     install(ContentNegotiation) { json(Json(WireJson) { explicitNulls=false; serializersModule=io.modelcontextprotocol.kotlin.sdk.types.McpJson.serializersModule }) }
@@ -57,7 +59,7 @@ fun Application.backendModule(settings: Settings, store: Store) {
             val origin = call.request.header(HttpHeaders.Origin)
             if(origin != null && origin !in setOf(settings.publicUrl,"https://chatgpt.com")) throw ApiFailure(403,"Origin rejected")
             val path = call.request.path()
-            if(path == "/mcp" || (path.startsWith("/api/v1/") && path !in setOf("/api/v1/auth/register","/api/v1/auth/login"))) {
+            if(path == "/mcp" || (path.startsWith("/api/v1/") && !path.startsWith("/api/v1/auth/social/") && path !in setOf("/api/v1/auth/register","/api/v1/auth/login"))) {
                 val token = call.request.header(HttpHeaders.Authorization)?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ").orEmpty()
                 val identity = withContext(Dispatchers.IO) { store.authenticate(token) }
                 if(identity == null) {
@@ -71,8 +73,32 @@ fun Application.backendModule(settings: Settings, store: Store) {
         }
     })
     routing {
+        get("/connection/proof") {
+            val publicAddress=System.getenv("ANDROID_PUBLIC_URL")?.takeIf { it.isNotBlank() } ?: runCatching { Files.readString(java.nio.file.Path.of(".local/backend-public-url.txt")).trim() }.getOrDefault("")
+            require(URI(publicAddress).scheme=="https") { "Публичный адрес ещё не опубликован" }
+            call.respond(connectionIdentity.proof(publicAddress,call.request.queryParameters["nonce"].orEmpty()))
+        }
+        get("/auth/social/{provider}/callback") {
+            val q=call.request.queryParameters
+            withContext(Dispatchers.IO) { social.callback(call.parameters["provider"].orEmpty(),q["state"].orEmpty(),q["code"],q["error"],q["device_id"]) }
+            call.respondText("Проверка входа завершена. Вернись в Habit Tracker: результат появится в приложении.",ContentType.Text.Plain)
+        }
         get("/health") { call.respond(buildJsonObject { put("status","ok"); put("stage","backend") }) }
         route("/api/v1") {
+            get("/auth/social/providers") {
+                val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
+                call.respond(withContext(Dispatchers.IO) { social.providers(store.authenticate(token)) })
+            }
+            post("/auth/social/start") {
+                throttle.check(call.request.local.remoteHost)
+                val request=call.receive<SocialStart>()
+                val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
+                call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token),token) })
+            }
+            post("/auth/social/poll") {
+                val request=call.receive<SocialPoll>();require(request.verifier.length in 43..128)
+                call.respond(social.poll(request))
+            }
             post("/auth/register") {
                 throttle.check(call.request.local.remoteHost)
                 val credentials = call.receive<Credentials>()

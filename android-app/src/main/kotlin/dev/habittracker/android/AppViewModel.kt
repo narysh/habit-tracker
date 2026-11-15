@@ -11,6 +11,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import android.content.Intent
+import java.security.SecureRandom
+import java.util.Base64
+import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
@@ -29,7 +37,59 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val message=MutableStateFlow<String?>(null)
     val busy=MutableStateFlow(false)
     val syncStatus=MutableStateFlow("Подключение…")
+    val serverUrl=MutableStateFlow(app.preferences.url())
+    val providers=MutableStateFlow<List<SocialProviderInfo>>(emptyList())
+    val socialBusy=MutableStateFlow(false)
+    private var socialJob: Job?=null
+    private val discovery=ServerDiscovery(app)
     init { if(session.value!=null) { periodic(); synchronize() } }
+    suspend fun findServer() {
+        try { prepareConnection() }
+        catch(e: java.io.IOException) { syncStatus.value="Нет связи с сервером. Повторим автоматически." }
+        catch(e: IllegalArgumentException) { syncStatus.value=e.message ?: "Ошибка адреса сервера" }
+    }
+    private suspend fun prepareConnection(): String = withContext(Dispatchers.IO) {
+        val url=if(app.preferences.automatic()) discovery.resolve() else serverUrl.value
+        if(url.isNotBlank()) {
+            val active=app.preferences.current()
+            if(active!=null && app.preferences.url()!=url) {
+                app.preferences.save(active,url,app.preferences.storageKey());repository.value=app.repository()
+            }
+            serverUrl.value=url
+            providers.value=Api(url) { active?.token }.get("/api/v1/auth/social/providers")
+        }
+        url
+    }
+    fun automaticConnection(enabled: Boolean) { app.preferences.automatic(enabled);action { prepareConnection() } }
+    fun manualAddress(url: String) { serverUrl.value=url }
+    fun socialLogin(provider: String,link: Boolean=false) {
+        if(socialBusy.value) return
+        socialBusy.value=true
+        socialJob=viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val url=prepareConnection()
+                val api=Api(url) { if(link) session.value?.token else null }
+                val verifier=Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also {SecureRandom().nextBytes(it)})
+                val challenge=Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
+                val attempt=api.post<SocialStart,SocialAttempt>("/api/v1/auth/social/start",SocialStart(provider,challenge,link))
+                withContext(Dispatchers.Main) { app.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(attempt.authorizationUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                repeat(150) {
+                    delay(2000)
+                    val result=api.post<SocialPoll,SocialResult>("/api/v1/auth/social/poll",SocialPoll(attempt.id,verifier))
+                    currentCoroutineContext().ensureActive()
+                    when(result.status) {
+                        "DONE"->{val signedIn=requireNotNull(result.session);app.preferences.save(signedIn,url);repository.value=app.repository();session.value=signedIn;periodic();refreshFromServer();return@launch}
+                        "LINKED"->{prepareConnection();message.value="Способ входа привязан";return@launch}
+                        "FAILED"->throw IllegalStateException(result.message ?: "Вход отменён")
+                    }
+                }
+                message.value="Время ожидания входа истекло. Попробуй снова."
+            } catch(e: CancellationException) { throw e }
+              catch(e: Exception) { message.value=e.message ?: "Не удалось войти" }
+            finally {socialBusy.value=false}
+        }
+    }
+    fun cancelSocialLogin() { socialJob?.cancel();socialBusy.value=false }
     private fun action(block: suspend ()->Unit) { viewModelScope.launch(Dispatchers.IO) { try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { message.value=e.message ?: "Не удалось выполнить действие" } } }
     fun changeServer(url: String,password: String,after: ()->Unit) {
         busy.value=true
@@ -39,6 +99,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val email=requireNotNull(session.value).email
                 val result=Api(normalized).post<Credentials,Session>("/api/v1/auth/login",Credentials(email,password))
                 app.preferences.reconnect(result,normalized)
+                app.preferences.automatic(false);serverUrl.value=normalized
                 repository.value=app.repository(); session.value=result
                 periodic(); refreshFromServer()
                 withContext(Dispatchers.Main) { after() }
@@ -49,7 +110,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         busy.value=true
         action {
             try {
-                val normalized=url.trim().trimEnd('/')
+                val normalized=(if(app.preferences.automatic()) prepareConnection() else url).trim().trimEnd('/')
                 val result=Api(normalized).post<Credentials,Session>("/api/v1/auth/${if(register) "register" else "login"}",Credentials(email.trim(),password))
                 UUID.fromString(result.userId)
                 app.preferences.save(result,normalized)
@@ -68,6 +129,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     suspend fun refreshFromServer() = withContext(Dispatchers.IO) {
         try {
+            prepareConnection()
             repository.value?.synchronize()
             syncStatus.value="Синхронизировано · ${java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))}"
         } catch(e: NetworkFailure) {
@@ -88,6 +150,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         withContext(Dispatchers.Main) { onFile(local) }
     }
     fun logout() = action {
+        cancelSocialLogin()
         val token=session.value?.token
         if(token!=null) runCatching { Api(app.preferences.url()) { token }.request("/api/v1/logout","POST") }
         app.preferences.clear(); Reminders.clear(app); WorkManager.getInstance(app).cancelUniqueWork("account-sync")

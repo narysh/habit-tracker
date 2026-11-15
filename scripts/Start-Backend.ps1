@@ -12,6 +12,8 @@ if(-not (Test-Path -LiteralPath $config)) {
     @("DB_PASSWORD=$(New-Secret)","MCP_CLIENT_SECRET=$(New-Secret)",'PUBLIC_URL=http://127.0.0.1:8081','MCP_CLIENT_ID=habit-tracker','MCP_REDIRECT_URIS=http://127.0.0.1:45838/callback') | Set-Content -LiteralPath $config -Encoding utf8
 }
 foreach($line in Get-Content -LiteralPath $config) { if($line -match '^([A-Z_]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process') } }
+$social=Join-Path $projectRoot '.local/social.env'
+if(Test-Path $social){foreach($line in Get-Content -LiteralPath $social){if($line-match '^([A-Z_]+)=(.*)$'){[Environment]::SetEnvironmentVariable($Matches[1],$Matches[2],'Process')}}}
 if($Docker) { docker compose --env-file $config up --build -d; if($LASTEXITCODE-ne 0){throw 'Docker startup failed'} }
 else {
     $gradle=Get-Command gradle -ErrorAction SilentlyContinue
