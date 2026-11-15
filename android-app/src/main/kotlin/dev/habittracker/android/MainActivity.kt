@@ -54,6 +54,10 @@ class MainActivity : ComponentActivity() {
 private val dateFormat=DateTimeFormatter.ofPattern("dd.MM.uuuu").withResolverStyle(ResolverStyle.STRICT)
 private fun localDate(value: String?): String = value?.let { LocalDate.parse(it).format(dateFormat) }.orEmpty()
 private fun parseDate(value: String): String? = value.trim().takeIf(String::isNotEmpty)?.let { LocalDate.parse(it,dateFormat).toString() }
+private fun countLabel(count: Int,one: String,few: String,many: String): String {
+    val word=if(count%100 in 11..14) many else when(count%10) { 1->one; 2,3,4->few; else->many }
+    return "$count $word"
+}
 private fun Content.description(): String = when(this) {
     is TaskContent -> listOf(title,description,dueDate?.let { "Срок: ${localDate(it)} ${dueTime.orEmpty()}" }.orEmpty(),if(completed) "Выполнено" else "Не выполнено").filter(String::isNotBlank).joinToString("\n")
     is NoteContent -> "$title\n$text\nВложений: ${attachmentIds.size}"
@@ -73,12 +77,15 @@ private fun Content.description(): String = when(this) {
     val conflicts by vm.conflicts.collectAsStateWithLifecycle()
     val files by vm.files.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
+    val pendingCount by vm.pendingCount.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
+    val syncStatus by vm.syncStatus.collectAsStateWithLifecycle()
     val snackbar=remember { SnackbarHostState() }
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.message.value=null } }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var settings by remember { mutableStateOf(false) }
+    var connection by remember { mutableStateOf(false) }
     var editor by remember { mutableStateOf<Pair<String,Content>?>(null) }
     var deleting by remember { mutableStateOf<Item?>(null) }
     var history by remember { mutableStateOf<Item?>(null) }
@@ -106,6 +113,7 @@ private fun Content.description(): String = when(this) {
         floatingActionButton={ if(session!=null) FloatingActionButton(onClick={if(tab==0) chooser=true else newItem(tab)}) { Icon(Icons.Outlined.Add,"Добавить") } },
     ) { padding ->
         if(session==null) LoginScreen(vm,Modifier.padding(padding)) else LazyColumn(Modifier.fillMaxSize().padding(padding),contentPadding=PaddingValues(start=20.dp,end=20.dp,top=12.dp,bottom=90.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            item { Text(syncStatus + if(pendingCount>0) " · ждут отправки: $pendingCount" else "",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant) }
             if(busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             if(conflicts.isNotEmpty()) item {
                 Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.errorContainer)) { Column(Modifier.padding(16.dp)) {
@@ -117,7 +125,7 @@ private fun Content.description(): String = when(this) {
             if(errors.isNotEmpty()) item { Text("Не отправлено: ${errors.size}. ${errors.first().error}",color=MaterialTheme.colorScheme.error) }
             if(tab==0) {
                 item { Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.primaryContainer)) {
-                    Column(Modifier.fillMaxWidth().padding(22.dp)) { Text("Твой день — в твоём ритме",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold); Spacer(Modifier.height(8.dp)); Text("${tasks.count { !(it.content as TaskContent).completed }} задач в работе · ${habits.size} привычек") }
+                    Column(Modifier.fillMaxWidth().padding(22.dp)) { Text("Твой день — в твоём ритме",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold); Spacer(Modifier.height(8.dp)); Text("${countLabel(tasks.count { !(it.content as TaskContent).completed },"задача","задачи","задач")} в работе · ${countLabel(habits.size,"привычка","привычки","привычек")}") }
                 } }
                 item { SectionTitle("На сегодня") }
                 val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && (task.dueDate==null || LocalDate.parse(task.dueDate)<=now) }
@@ -150,7 +158,24 @@ private fun Content.description(): String = when(this) {
     editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null}) }
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(connection) ConnectionDialog(vm) { connection=false }
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+}
+@Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
+    val session by vm.session.collectAsStateWithLifecycle()
+    var url by remember { mutableStateOf(vm.app.preferences.url()) }
+    var password by remember { mutableStateOf("") }
+    val busy by vm.busy.collectAsStateWithLifecycle()
+    AlertDialog(onDismissRequest={if(!busy) onClose()},title={Text("Подключение к серверу")},text={
+        Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Text("Укажи HTTPS-адрес того же сервера и подтверди вход. Задачи, файлы и неотправленные изменения останутся на телефоне.")
+            Text(session?.email.orEmpty())
+            OutlinedTextField(url,{url=it},label={Text("Адрес сервера")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(password,{password=it},label={Text("Пароль аккаунта")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+            Text("При бесплатном туннеле адрес может меняться. Компьютер и сервер должны быть включены.",style=MaterialTheme.typography.bodySmall)
+            if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+    },confirmButton={TextButton(enabled=!busy && password.isNotBlank() && url.isNotBlank(),onClick={vm.changeServer(url,password,onClose)}) {Text("Подключить")}},dismissButton={TextButton(enabled=!busy,onClick=onClose){Text("Отмена")}})
 }
 @Composable private fun LoginScreen(vm: AppViewModel,modifier: Modifier) {
     var email by rememberSaveable { mutableStateOf("") }; var password by remember { mutableStateOf("") }

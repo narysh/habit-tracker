@@ -13,10 +13,12 @@ $deadline=(Get-Date).AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 250
     $text=Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue
-    if($text-match 'tunneled with tls termination,\s+(https://[a-z0-9.-]+)'){
-        $url=$Matches[1]
-        $health=Invoke-RestMethod "$url/health" -TimeoutSec 10
-        if($health.stage-ne 'backend'){throw 'Unexpected service at public endpoint'}
+    if([string]::IsNullOrEmpty($text)) { $process.Refresh(); continue }
+    $urls=[regex]::Matches([string]$text,'tunneled with tls termination,\s+(https://[a-z0-9.-]+)')
+    if($urls.Count-gt 0){
+        $url=$urls[$urls.Count-1].Groups[1].Value
+        try { $health=Invoke-RestMethod "$url/health" -TimeoutSec 5 } catch { continue }
+        if($health.stage-ne 'backend'){continue}
         $url|Set-Content .local/backend-public-url.txt
         Write-Output "Temporary Android API URL: $url"
         Write-Output 'The domain may rotate. This does not change the local desktop OAuth connection.'

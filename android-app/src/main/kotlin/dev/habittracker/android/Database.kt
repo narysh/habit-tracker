@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
     @Query("SELECT * FROM conflicts") fun observeConflicts(): Flow<List<Conflict>>
     @Query("SELECT * FROM files") fun observeFiles(): Flow<List<LocalFile>>
     @Query("SELECT * FROM outbox WHERE error IS NOT NULL") fun observeErrors(): Flow<List<PendingMutation>>
+    @Query("SELECT COUNT(*) FROM outbox") fun observePendingCount(): Flow<Int>
     @Query("SELECT * FROM items") suspend fun items(): List<LocalItem>
     @Query("SELECT * FROM items WHERE id=:id") suspend fun item(id: String): LocalItem?
     @Upsert suspend fun item(value: LocalItem)

@@ -30,13 +30,19 @@ class SessionPreferences(context: Context) {
         cipher.init(Cipher.DECRYPT_MODE,key(),GCMParameterSpec(128,Base64.decode(parts[0],Base64.NO_WRAP)))
         WireJson.decodeFromString<Session>(String(cipher.doFinal(Base64.decode(parts[1],Base64.NO_WRAP)),Charsets.UTF_8))
     } catch (_: Exception) { null } }
-    fun save(session: Session,baseUrl: String) {
+    fun save(session: Session,baseUrl: String,storageKey: String = prefs.getString("store-${session.userId}-$baseUrl",null) ?: (session.userId + "-" + baseUrl.hashCode().toUInt().toString(16))) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE,key()) }
         val payload = cipher.doFinal(WireJson.encodeToString(session).toByteArray())
         val encoded = Base64.encodeToString(cipher.iv,Base64.NO_WRAP) + ":" + Base64.encodeToString(payload,Base64.NO_WRAP)
-        check(prefs.edit().putString("session",encoded).putString("url",baseUrl).commit())
+        check(prefs.edit().putString("session",encoded).putString("url",baseUrl).putString("storageKey",storageKey).putString("store-${session.userId}-$baseUrl",storageKey).commit())
     }
-    fun url(): String = prefs.getString("url","http://10.0.2.2:8081")!!
+    fun storageKey(): String = prefs.getString("storageKey",null) ?: (requireNotNull(current()).userId + "-" + url().hashCode().toUInt().toString(16))
+    fun reconnect(session: Session,baseUrl: String) {
+        val old=requireNotNull(current()) { "Сначала войди в аккаунт" }
+        require(old.userId==session.userId && old.email==session.email) { "На этом сервере другой аккаунт. Текущие данные сохранены; адрес не изменён." }
+        save(session,baseUrl,storageKey())
+    }
+    fun url(): String = prefs.getString("url",if(android.os.Build.PRODUCT.contains("sdk")) "http://10.0.2.2:8081" else "")!!
     fun clear() { prefs.edit().remove("session").commit() }
 }
 class NetworkFailure(val status: Int,message: String) : java.io.IOException(message)
@@ -54,7 +60,7 @@ class Api(private val baseUrl: String,private val token: () -> String? = { null 
             if(code !in 200..299) {
                 val text = connection.errorStream?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
                 val message = runCatching { WireJson.decodeFromString<ApiError>(text).error }.getOrDefault("Ошибка сервера: $code")
-                throw NetworkFailure(code,if(code==401) "Сессия истекла. Войди снова; локальные изменения сохранены." else message)
+                throw NetworkFailure(code,message)
             }
             return connection.inputStream.use { it.readBytes() }
         } finally { connection.disconnect() }

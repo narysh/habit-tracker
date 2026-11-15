@@ -15,7 +15,7 @@ import java.util.UUID
 
 class Repository(val app: HabitApplication,val session: Session,private val autoSchedule: Boolean = true) {
     val serverUrl = app.preferences.url()
-    private val key = session.userId + "-" + serverUrl.hashCode().toUInt().toString(16)
+    private val key = app.preferences.storageKey()
     val database = TrackerDatabase.open(app,key)
     val dao = database.dao()
     val items = dao.observeItems().map { rows -> rows.map { WireJson.decodeFromString<Item>(it.localJson) } }

@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.*
 import dev.habittracker.shared.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -24,10 +25,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val conflicts=repository.flatMapLatest { it?.conflicts ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
     val files=repository.flatMapLatest { it?.files ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
     val errors=repository.flatMapLatest { it?.errors ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
+    val pendingCount=repository.flatMapLatest { it?.dao?.observePendingCount() ?: flowOf(0) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),0)
     val message=MutableStateFlow<String?>(null)
     val busy=MutableStateFlow(false)
+    val syncStatus=MutableStateFlow("Подключение…")
     init { if(session.value!=null) { periodic(); synchronize() } }
-    private fun action(block: suspend ()->Unit) { viewModelScope.launch(Dispatchers.IO) { try { block() } catch(e: Exception) { message.value=e.message ?: "Не удалось выполнить действие" } } }
+    private fun action(block: suspend ()->Unit) { viewModelScope.launch(Dispatchers.IO) { try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { message.value=e.message ?: "Не удалось выполнить действие" } } }
+    fun changeServer(url: String,password: String,after: ()->Unit) {
+        busy.value=true
+        action {
+            try {
+                val normalized=url.trim().trimEnd('/')
+                val email=requireNotNull(session.value).email
+                val result=Api(normalized).post<Credentials,Session>("/api/v1/auth/login",Credentials(email,password))
+                app.preferences.reconnect(result,normalized)
+                repository.value=app.repository(); session.value=result
+                periodic(); refreshFromServer()
+                withContext(Dispatchers.Main) { after() }
+            } finally { busy.value=false }
+        }
+    }
     fun login(url: String,email: String,password: String,register: Boolean) {
         busy.value=true
         action {
@@ -46,13 +63,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun synchronize() = action {
         busy.value=true
-        try { repository.value?.synchronize(); message.value="Синхронизировано" }
-        catch(e: java.io.IOException) { message.value=e.message ?: "Нет сети. Изменения сохранены на телефоне." }
+        try { refreshFromServer() }
         finally { busy.value=false }
     }
     suspend fun refreshFromServer() = withContext(Dispatchers.IO) {
-        try { repository.value?.synchronize() }
-        catch (_: java.io.IOException) { /* Offline edits stay in the persistent outbox. */ }
+        try {
+            repository.value?.synchronize()
+            syncStatus.value="Синхронизировано · ${java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))}"
+        } catch(e: NetworkFailure) {
+            syncStatus.value=if(e.status==401) "Нужно войти снова — данные на телефоне сохранены" else "Ошибка сервера: ${e.status}"
+        } catch (_: java.io.IOException) { syncStatus.value="Нет связи — изменения сохранены на телефоне" }
     }
     fun save(content: Content,id: String=UUID.randomUUID().toString(),after: ()->Unit = {}) = action {
         repository.value!!.save(content,id)

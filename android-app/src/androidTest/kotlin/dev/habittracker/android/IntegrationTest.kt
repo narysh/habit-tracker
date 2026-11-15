@@ -78,4 +78,29 @@ class IntegrationTest {
             compose.onNodeWithText("Задача из Compose").assertIsDisplayed()
         }
     }
+    @Test fun reconnectKeepsOfflineQueueFilesAndRejectsAnotherAccount()=runBlocking(Dispatchers.IO) {
+        val session=account()
+        val original=Repository(app,session,false)
+        val id=UUID.randomUUID().toString()
+        original.save(NoteContent("До смены адреса"),id)
+        val source=File(app.cacheDir,"reconnect.txt").apply { writeText("preserved-file") }
+        original.attach(id,Uri.fromFile(source))
+        val operation=original.dao.pending(id)!!.operationJson
+        val key=app.preferences.storageKey()
+        val alias="http://10.0.2.2:8081/"
+        app.preferences.reconnect(session,alias)
+        val reconnected=Repository(app,session,false)
+        assertEquals(operation,reconnected.dao.pending(id)!!.operationJson)
+        assertEquals("preserved-file",File(reconnected.dao.files().single().path!!).readText())
+        app.preferences.clear()
+        app.preferences.save(session,alias)
+        assertEquals(key,app.preferences.storageKey())
+        val other=Api(alias).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@device.test","another-password-123"))
+        try { app.preferences.reconnect(other,alias); fail("Another account must not inherit the local database") } catch(_: IllegalArgumentException) { }
+        assertEquals(session.userId,app.preferences.current()!!.userId)
+        reconnected.synchronize()
+        assertNull(reconnected.dao.pending(id))
+        assertTrue(reconnected.dao.files().single().uploaded)
+        original.database.close(); reconnected.database.close()
+    }
 }
