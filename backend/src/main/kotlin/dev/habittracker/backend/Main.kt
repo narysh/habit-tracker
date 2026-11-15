@@ -30,15 +30,14 @@ fun main() {
     val store = Store(settings.jdbcUrl,settings.dbUser,settings.dbPassword)
     embeddedServer(Netty,host="0.0.0.0",port=settings.port) { backendModule(settings,store) }.start(wait=true)
 }
-fun Application.backendModule(settings: Settings, store: Store) {
+fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store)) {
     val logger = environment.log
     val oauth = AccountOAuth(settings,store)
-    val social = SocialLogin(store)
     val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"))
     val throttle = LoginThrottle()
     Files.createDirectories(settings.files)
     install(ContentNegotiation) { json(Json(WireJson) { explicitNulls=false; serializersModule=io.modelcontextprotocol.kotlin.sdk.types.McpJson.serializersModule }) }
-    install(RequestBodyLimit) { bodyLimit { if(it.request.path().startsWith("/api/v1/attachments/")) 20L*1024*1024 else 2L*1024*1024 } }
+    install(RequestBodyLimit) { bodyLimit { if(it.request.path().startsWith("/api/v1/attachments/")) 20L*1024*1024 else 8L*1024*1024 } }
     install(StatusPages) {
         exception<io.ktor.server.plugins.PayloadTooLargeException> { call,_ -> call.respond(HttpStatusCode.PayloadTooLarge,ApiError("Слишком большой запрос")) }
         exception<ApiFailure> { call,e -> call.respond(HttpStatusCode.fromValue(e.status),ApiError(e.message)) }
@@ -119,6 +118,10 @@ fun Application.backendModule(settings: Settings, store: Store) {
             post("/mutations") {
                 val mutation = call.receive<Mutation>()
                 call.respond(withContext(Dispatchers.IO) { store.mutate(call.attributes[identityKey].userId,mutation) })
+            }
+            post("/week-plans/{id}/apply") {
+                val request=call.receive<ApplyPlanRequest>()
+                call.respond(withContext(Dispatchers.IO) {store.applyWeekPlan(call.attributes[identityKey].userId,call.parameters["id"].orEmpty(),request.expectedVersion)})
             }
             post("/sync") {
                 val request = call.receive<SyncRequest>()

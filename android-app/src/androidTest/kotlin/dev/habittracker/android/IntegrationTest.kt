@@ -20,8 +20,8 @@ class IntegrationTest {
     @get:Rule val compose=createEmptyComposeRule()
     private val app get()=ApplicationProvider.getApplicationContext<HabitApplication>()
     private fun account(): Session {
-        val session=Api("http://10.0.2.2:8081").post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@device.test","test-password-123"))
-        app.preferences.save(session,"http://10.0.2.2:8081")
+        val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@device.test","test-password-123"))
+        app.preferences.save(session,TestServer.url)
         return session
     }
     @Test fun offlinePersistenceSyncConflictFilesAndAccountIsolation()=runBlocking(Dispatchers.IO) {
@@ -35,7 +35,7 @@ class IntegrationTest {
         val remote=WireJson.decodeFromString<Item>(repo.dao.item(id)!!.serverJson!!)
         assertEquals(1L,remote.version)
         repo.save(TaskContent("Правка телефона"),id)
-        val api=Api("http://10.0.2.2:8081") { session.token }
+        val api=Api(TestServer.url) { session.token }
         api.post<Mutation,MutationResult>("/api/v1/mutations",Mutation(UUID.randomUUID().toString(),id,remote.version,TaskContent("Правка AI")))
         repo.synchronize()
         val conflict=repo.dao.conflict(id)!!
@@ -57,7 +57,7 @@ class IntegrationTest {
         assertEquals("attachment-roundtrip",api.request("/api/v1/attachments/${file.id}").toString(Charsets.UTF_8))
         val bob=account()
         try { repo.synchronize(); fail("Old repository must not send Alice's data with Bob's token") } catch(e: NetworkFailure) { assertEquals(401,e.status) }
-        assertTrue(Api("http://10.0.2.2:8081") { bob.token }.get<List<Item>>("/api/v1/items").isEmpty())
+        assertTrue(Api(TestServer.url) { bob.token }.get<List<Item>>("/api/v1/items").isEmpty())
         repo.database.close()
     }
     @Test fun composeCanCreateTaskAndSurviveActivityRecreation() {
@@ -87,7 +87,7 @@ class IntegrationTest {
         original.attach(id,Uri.fromFile(source))
         val operation=original.dao.pending(id)!!.operationJson
         val key=app.preferences.storageKey()
-        val alias="http://10.0.2.2:8081/"
+        val alias=TestServer.url + "/"
         app.preferences.reconnect(session,alias)
         val reconnected=Repository(app,session,false)
         assertEquals(operation,reconnected.dao.pending(id)!!.operationJson)

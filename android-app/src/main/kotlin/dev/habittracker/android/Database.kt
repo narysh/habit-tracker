@@ -2,6 +2,7 @@ package dev.habittracker.android
 
 import android.content.Context
 import androidx.room.*
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName="items") data class LocalItem(@PrimaryKey val id: String, val localJson: String, val serverJson: String?)
@@ -18,12 +19,13 @@ import kotlinx.coroutines.flow.Flow
     @Query("SELECT * FROM items") suspend fun items(): List<LocalItem>
     @Query("SELECT * FROM items WHERE id=:id") suspend fun item(id: String): LocalItem?
     @Upsert suspend fun item(value: LocalItem)
-    @Query("SELECT * FROM outbox WHERE error IS NULL LIMIT 100") suspend fun pending(): List<PendingMutation>
+    @Query("SELECT * FROM outbox WHERE error IS NULL") suspend fun pending(): List<PendingMutation>
     @Query("SELECT * FROM outbox WHERE itemId=:id") suspend fun pending(id: String): PendingMutation?
     @Upsert suspend fun pending(value: PendingMutation)
     @Query("DELETE FROM outbox WHERE itemId=:id") suspend fun removePending(id: String)
     @Upsert suspend fun conflict(value: Conflict)
     @Query("SELECT * FROM conflicts WHERE itemId=:id") suspend fun conflict(id: String): Conflict?
+    @Query("SELECT * FROM conflicts") suspend fun allConflicts(): List<Conflict>
     @Query("DELETE FROM conflicts WHERE itemId=:id") suspend fun removeConflict(id: String)
     @Query("SELECT * FROM files") suspend fun files(): List<LocalFile>
     @Query("SELECT * FROM files WHERE id=:id") suspend fun file(id: String): LocalFile?
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.Flow
 abstract class TrackerDatabase : RoomDatabase() {
     abstract fun dao(): TrackerDao
     companion object {
-        fun open(context: Context,key: String): TrackerDatabase = Room.databaseBuilder(context,TrackerDatabase::class.java,"tracker-$key.db").build()
+        fun open(context: Context,key: String): TrackerDatabase = Room.databaseBuilder(context,TrackerDatabase::class.java,"tracker-$key.db")
+            .setDriver(BundledSQLiteDriver()).build()
     }
 }

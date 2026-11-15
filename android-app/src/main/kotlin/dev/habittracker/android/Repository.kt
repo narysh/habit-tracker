@@ -3,7 +3,8 @@ package dev.habittracker.android
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import androidx.room.withTransaction
+import androidx.room.useWriterConnection
+import androidx.room.immediateTransaction
 import androidx.work.*
 import dev.habittracker.shared.*
 import kotlinx.coroutines.flow.map
@@ -23,23 +24,39 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
     val files = dao.observeFiles()
     val errors = dao.observeErrors()
     private val mutex = Mutex()
+    private suspend fun <T> transaction(block: suspend ()->T): T = database.useWriterConnection { it.immediateTransaction { block() } }
+    suspend fun <T> exclusive(block: suspend ()->T): T=mutex.withLock {block()}
     private val api get() = Api(serverUrl) {
         val active=app.preferences.current()
         if(active?.userId!=session.userId || app.preferences.url()!=serverUrl) throw NetworkFailure(401,"Аккаунт изменился; синхронизация остановлена")
         active.token
     }
-    suspend fun save(content: Content,id: String=UUID.randomUUID().toString(),deleted: Boolean=false) {
-        content.validate()
-        database.withTransaction {
+    suspend fun save(content: Content,id: String=UUID.randomUUID().toString(),deleted: Boolean=false,notify: Boolean=true) {
+        transaction {
             require(dao.conflict(id)==null) { "Сначала выбери версию в конфликте" }
             val row = dao.item(id)
+            val previous=row?.let {WireJson.decodeFromString<Item>(it.localJson).content as? TaskContent}
+            val unknown=content is TaskContent && content.completed && content.completionDateUnknown && previous?.completed!=false
+            val value=if(content is TaskContent) content.copy(completionDateUnknown=unknown,completedAt=if(content.completed && !unknown) content.completedAt ?: if(previous?.completed==true)previous.completedAt else Instant.now().toString() else null) else content
+            value.validate()
             val remote = row?.serverJson?.let { WireJson.decodeFromString<Item>(it) }
-            val mutation = Mutation(UUID.randomUUID().toString(),id,remote?.version ?: 0,content,deleted)
-            val local = Item(id,remote?.version ?: 0,content,deleted,Instant.now().toString(),remote?.sequence ?: 0)
+            val mutation = Mutation(UUID.randomUUID().toString(),id,remote?.version ?: 0,value,deleted)
+            val local = Item(id,remote?.version ?: 0,value,deleted,Instant.now().toString(),remote?.sequence ?: 0)
             dao.item(LocalItem(id,WireJson.encodeToString(local),row?.serverJson))
             dao.pending(PendingMutation(id,WireJson.encodeToString(mutation)))
         }
-        scheduleSync(); Reminders.reschedule(app,this)
+        if(notify){scheduleSync(); Reminders.reschedule(app,this); TrackerWidget.updateAll(app)}
+    }
+    suspend fun applyPlan(item: Item) {
+        val plan=item.content as WeekPlanContent
+        synchronize()
+        for(move in plan.moves) {
+            require(dao.pending(move.itemId)==null && dao.conflict(move.itemId)==null) { "Сначала отправь локальные изменения и разреши конфликты" }
+            val remote=dao.item(move.itemId)?.serverJson?.let {WireJson.decodeFromString<Item>(it)}
+            require(remote?.version==move.expectedVersion) { "План устарел. Попроси ассистента обновить его." }
+        }
+        api.post<ApplyPlanRequest,Item>("/api/v1/week-plans/${item.id}/apply",ApplyPlanRequest(item.version))
+        synchronize()
     }
     fun scheduleSync() {
         if(!autoSchedule) return
@@ -47,7 +64,7 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
         WorkManager.getInstance(app).enqueueUniqueWork("sync-$key",ExistingWorkPolicy.APPEND_OR_REPLACE,OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(constraints).build())
     }
     suspend fun resolve(conflict: Conflict,keepLocal: Boolean) {
-        database.withTransaction {
+        transaction {
             val remote = conflict.remoteJson?.let { WireJson.decodeFromString<Item>(it) }
             val local = WireJson.decodeFromString<Item>(conflict.localJson)
             if(keepLocal) {
@@ -59,16 +76,24 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
             }
             dao.removeConflict(local.id)
         }
-        scheduleSync(); Reminders.reschedule(app,this)
+        scheduleSync(); Reminders.reschedule(app,this); TrackerWidget.updateAll(app)
     }
     suspend fun synchronize() = mutex.withLock {
         var rounds=0
         do {
             val pending = dao.pending()
-            val sent = pending.map { WireJson.decodeFromString<Mutation>(it.operationJson) }
+            val candidates = pending.map { WireJson.decodeFromString<Mutation>(it.operationJson) }.sortedWith(compareBy<Mutation> {
+                if(it.baseVersion>0) 4 else when(it.content){is ProjectContent->0;is HabitMarkContent->2;is WeekPlanContent->3;else->1}
+            }.thenBy {it.itemId}).take(100).map {mutation->
+                // Create linked offline records first; acknowledge only their server base.
+                // The original queued mutation then restores links after every target exists.
+                if(mutation.baseVersion==0L && !mutation.deleted && mutation.content.organization.linkedIds.isNotEmpty()) mutation.copy(operationId=UUID.nameUUIDFromBytes("bootstrap:${mutation.operationId}".toByteArray()).toString(),content=mutation.content.withOrganization(mutation.content.organization.copy(linkedIds=emptySet()))) else mutation
+            }
+            val sent=mutableListOf<Mutation>();var bytes=256
+            for(candidate in candidates){val size=WireJson.encodeToString(candidate).toByteArray().size;if(sent.isNotEmpty() && bytes+size>7*1024*1024)break;require(size<=7*1024*1024){"Одна запись превышает размер пакета синхронизации"};sent+=candidate;bytes+=size}
             val cursor = dao.metadata("cursor")?.toLong() ?: 0
             val response = api.post<SyncRequest,SyncResponse>("/api/v1/sync",SyncRequest(sent,cursor))
-            database.withTransaction {
+            transaction {
                 for(result in response.results) {
                     val operation = sent.first { it.operationId == result.operationId }
                     val current = dao.pending(operation.itemId)
@@ -90,7 +115,7 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
                             dao.conflict(Conflict(row.id,row.localJson,remoteJson)); dao.removePending(row.id)
                             dao.item(row.copy(serverJson=remoteJson))
                         }
-                        MutationStatus.REJECTED -> if(current != null && queued?.operationId == operation.operationId) dao.pending(current.copy(error=result.message ?: "Операция отклонена"))
+                        MutationStatus.REJECTED -> if(current != null && queued!=null && (queued.operationId == operation.operationId || UUID.nameUUIDFromBytes("bootstrap:${queued.operationId}".toByteArray()).toString()==operation.operationId)) dao.pending(current.copy(error=result.message ?: "Операция отклонена"))
                     }
                 }
                 for(remote in response.changes) {
@@ -107,6 +132,7 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
             }
             rounds++
         } while(rounds < 20 && (response.hasMore || dao.pending().isNotEmpty()))
+        if(dao.pending().isNotEmpty())scheduleSync()
         val rows = dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }.filter { !it.deleted && it.content is NoteContent }
         for(row in rows) {
             if(dao.pending(row.id) != null || dao.conflict(row.id) != null) continue
@@ -121,23 +147,30 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
                 dao.file(LocalFile(file.id,file.noteId,file.name,file.mediaType,file.size,existing?.path,true))
             }
         }
-        Reminders.reschedule(app,this)
+        Reminders.reschedule(app,this); TrackerWidget.updateAll(app)
     }
-    suspend fun attach(noteId: String,uri: Uri) {
+    suspend fun attach(noteId: String,uri: Uri,nameOverride: String?=null,mimeOverride: String?=null,attachmentId: String=UUID.randomUUID().toString(),notify: Boolean=true) {
         val item = dao.item(noteId)?.let { WireJson.decodeFromString<Item>(it.localJson) } ?: error("Заметка не найдена")
         val note = item.content as? NoteContent ?: error("Это не заметка")
-        var name = "Файл"
-        app.contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst()) name=it.getString(0) }
-        val id=UUID.randomUUID().toString(); val dir=File(app.filesDir,"attachments/$key").apply { mkdirs() }; val target=File(dir,id)
-        val mime=app.contentResolver.getType(uri) ?: "application/octet-stream"
+        val id=attachmentId;UUID.fromString(id)
+        if(id in note.attachmentIds && dao.file(id)!=null) return
+        var name = nameOverride ?: uri.lastPathSegment ?: "Файл"
+        if(nameOverride==null) app.contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst()) name=it.getString(0) }
+        val dir=File(app.filesDir,"attachments/$key").apply { mkdirs() }; val target=File(dir,id)
+        val mime=mimeOverride ?: app.contentResolver.getType(uri) ?: "application/octet-stream"
         try {
             app.contentResolver.openInputStream(uri)!!.use { source -> target.outputStream().use { output ->
                 val buffer=ByteArray(8192); var total=0L
                 while(true) { val count=source.read(buffer); if(count<0) break; total+=count; require(total<=20*1024*1024) { "Файл больше 20 МБ" }; output.write(buffer,0,count) }
             } }
             dao.file(LocalFile(id,noteId,name,mime,target.length(),target.absolutePath,false))
-            save(note.copy(attachmentIds=note.attachmentIds+id),noteId)
+            save(note.copy(attachmentIds=(note.attachmentIds+id).distinct()),noteId,notify=notify)
         } catch(e: Throwable) { target.delete(); dao.removeFile(id); throw e }
+    }
+    suspend fun fileMetadata(noteId: String): List<LocalFile> {
+        val files=api.get<List<Attachment>>("/api/v1/notes/$noteId/attachments")
+        files.forEach {file->val old=dao.file(file.id);dao.file(LocalFile(file.id,file.noteId,file.name,file.mediaType,file.size,old?.path,true))}
+        return dao.files().filter {it.noteId==noteId}
     }
     suspend fun cachedFile(file: LocalFile): File {
         file.path?.let { if(File(it).exists()) return File(it) }
@@ -150,8 +183,10 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
 
 class HabitApplication : android.app.Application() {
     lateinit var preferences: SessionPreferences; private set
+    lateinit var shareInbox: ShareInbox; private set
+    val shortcut=kotlinx.coroutines.flow.MutableStateFlow(false)
     @Volatile private var cached: Repository? = null
-    override fun onCreate() { super.onCreate(); preferences=SessionPreferences(this) }
+    override fun onCreate() { super.onCreate(); preferences=SessionPreferences(this);shareInbox=ShareInbox(this) }
     @Synchronized fun repository(): Repository? {
         val session=preferences.current() ?: return null
         if(cached?.session?.userId != session.userId || cached?.serverUrl != preferences.url()) cached=Repository(this,session)

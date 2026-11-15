@@ -19,8 +19,8 @@ class SharedAccountTest {
         assumeTrue("Run scripts/Test-SharedAccount.ps1 to supply the local fixture",fixture.exists())
         val credentials=WireJson.decodeFromString<Credentials>(fixture.readText())
         fixture.delete()
-        val session=Api("http://10.0.2.2:8081").post<Credentials,Session>("/api/v1/auth/login",credentials)
-        app.preferences.save(session,"http://10.0.2.2:8081")
+        val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/login",credentials)
+        app.preferences.save(session,TestServer.url)
         val repo=Repository(app,session,false)
         repo.synchronize()
         val contents=repo.dao.items().map {WireJson.decodeFromString<Item>(it.localJson)}.filterNot {it.deleted}.map {it.content}

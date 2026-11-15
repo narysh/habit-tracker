@@ -40,6 +40,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val serverUrl=MutableStateFlow(app.preferences.url())
     val providers=MutableStateFlow<List<SocialProviderInfo>>(emptyList())
     val socialBusy=MutableStateFlow(false)
+    val backupPreview=MutableStateFlow<BackupPreview?>(null)
+    val reminderSettings=MutableStateFlow(Reminders.settings(app))
     private var socialJob: Job?=null
     private val discovery=ServerDiscovery(app)
     init { if(session.value!=null) { periodic(); synchronize() } }
@@ -145,6 +147,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun mark(item: Item,date: LocalDate,completed: Boolean) { save(HabitMarkContent(item.id,date.toString(),completed),markId(item.id,date)) }
     fun resolve(conflict: Conflict,keepLocal: Boolean) = action { repository.value!!.resolve(conflict,keepLocal) }
     fun attach(noteId: String,uri: Uri) = action { repository.value!!.attach(noteId,uri) }
+    fun applyPlan(item: Item,after: ()->Unit) = action {
+        busy.value=true
+        try {repository.value!!.applyPlan(item);message.value="План применён";withContext(Dispatchers.Main){after()}} finally {busy.value=false}
+    }
+    fun saveReminderSettings(value: ReminderSettings,after: ()->Unit)=action {
+        Reminders.saveSettings(app,value);reminderSettings.value=value;repository.value?.let {Reminders.reschedule(app,it)}
+        withContext(Dispatchers.Main){after()}
+    }
+    fun exportBackup(uri: Uri)=action {busy.value=true;try{Backups.export(repository.value!!,uri);message.value="Резервная копия сохранена"}finally{busy.value=false}}
+    fun inspectBackup(uri: Uri)=action {busy.value=true;try{backupPreview.value?.archive?.delete();backupPreview.value=null;backupPreview.value=Backups.inspect(app,uri)}finally{busy.value=false}}
+    fun cancelBackup(){backupPreview.value?.archive?.delete();backupPreview.value=null}
+    fun restoreBackup()=action {busy.value=true;try{val preview=requireNotNull(backupPreview.value);val count=Backups.restore(repository.value!!,preview);cancelBackup();message.value="Восстановлено записей: $count"}finally{busy.value=false}}
+    fun acceptShare(draft: SharedDraft,asTask: Boolean)=action {
+        busy.value=true
+        try {
+            val repo=repository.value ?: error("Сначала войди в аккаунт")
+            if(repo.dao.item(draft.id)==null)repo.save(if(asTask)TaskContent(draft.title.trim(),description=draft.text,zoneId=ZoneId.systemDefault().id)else NoteContent(draft.title.trim(),draft.text),draft.id)
+            draft.files.forEachIndexed {index,file->val id=UUID.nameUUIDFromBytes("share:${draft.id}:$index".toByteArray()).toString();repo.attach(draft.id,Uri.fromFile(java.io.File(file.path)),file.name,file.mime,id)}
+            app.shareInbox.remove(draft.id);message.value="Сохранено из другого приложения"
+        } finally {busy.value=false}
+    }
     fun open(file: LocalFile,onFile: (java.io.File)->Unit) = action {
         val local=repository.value!!.cachedFile(file)
         withContext(Dispatchers.Main) { onFile(local) }
@@ -155,5 +178,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if(token!=null) runCatching { Api(app.preferences.url()) { token }.request("/api/v1/logout","POST") }
         app.preferences.clear(); Reminders.clear(app); WorkManager.getInstance(app).cancelUniqueWork("account-sync")
         session.value=null; repository.value=null
+        TrackerWidget.updateAll(app)
     }
 }

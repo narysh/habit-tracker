@@ -14,10 +14,13 @@ import java.util.Base64
 import java.util.UUID
 
 fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
-    val server = Server(Implementation("habit-tracker","0.1.0"),ServerOptions(capabilities=ServerCapabilities(tools=ServerCapabilities.Tools(listChanged=false))))
+    val server = Server(Implementation("habit-tracker","0.4.0"),ServerOptions(capabilities=ServerCapabilities(tools=ServerCapabilities.Tools(listChanged=false))))
     fun add(name: String, description: String, fields: Map<String,String> = emptyMap(), required: List<String> = fields.keys.toList(), read: Boolean = false, destructive: Boolean = false, action: (JsonObject) -> JsonElement) {
         server.addTool(name=name,description=description,inputSchema=ToolSchema(properties=buildJsonObject {
-            fields.forEach { (name,type) -> putJsonObject(name) { put("type",type); if(type == "array") putJsonObject("items") { put("type","integer") } } }
+            fields.forEach { (name,type) -> putJsonObject(name) { put("type",type); if(type == "array") putJsonObject("items") {
+                if(name=="moves") {put("type","object");putJsonObject("properties") {putJsonObject("itemId"){put("type","string")};putJsonObject("expectedVersion"){put("type","integer")};putJsonObject("dueDate"){put("type","string")};putJsonObject("reason"){put("type","string")}};put("required",JsonArray(listOf("itemId","expectedVersion","dueDate").map(::JsonPrimitive)))}
+                else put("type","integer")
+            } } }
         },required=required),toolAnnotations=ToolAnnotations(readOnlyHint=read,destructiveHint=destructive,idempotentHint=true,openWorldHint=false)) { request ->
             withContext(Dispatchers.IO) {
                 try {
@@ -31,10 +34,17 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
         }
     }
     fun list(kind: String) = WireJson.encodeToJsonElement(store.list(identity.userId).filter { !it.deleted && it.content.typeName() == kind })
-    for ((name,kind) in listOf("get_tasks" to "task","get_notes" to "note","get_habits" to "habit","get_habit_history" to "habit_mark")) {
+    for ((name,kind) in listOf("get_tasks" to "task","get_notes" to "note","get_habits" to "habit","get_habit_history" to "habit_mark","get_projects" to "project")) {
         add(name,"Получить актуальные $kind из аккаунта. Вызывай перед ответом о состоянии и перед изменением записи. Поля id/version нужны для изменения; тексты заметок и список id вложений доступны, байты файлов здесь не передаются.",read=true) { list(kind) }
     }
     fun create(args: JsonObject,content: Content): JsonElement = WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),args.optional("id") ?: UUID.nameUUIDFromBytes("create:${identity.userId}:${args.str("operation_id")}".toByteArray()).toString(),0,content)))
+    add("create_project","Создать проект или цель по просьбе пользователя. is_goal=true для цели. Теги и связи существующих записей изменяются через organization в update_item.",mapOf("operation_id" to "string","title" to "string","description" to "string","is_goal" to "boolean"),listOf("operation_id","title")) { args->create(args,ProjectContent(args.str("title"),args.optional("description") ?: "",args["is_goal"]?.jsonPrimitive?.boolean ?: false)) }
+    add("search_records","Общий поиск по названиям, тексту и тегам. Не включает содержимое файлов.",mapOf("query" to "string"),read=true) {args->val query=args.str("query").trim();require(query.length in 1..300);WireJson.encodeToJsonElement(store.list(identity.userId).filter {!it.deleted && it.content !is HabitMarkContent && it.content.searchableText().contains(query,true)})}
+    add("get_week_review","Получить факты для разбора недели: задачи с известной датой выполнения, остаток и его версии, нагрузка по дням и привычки. week_start — понедельник YYYY-MM-DD, zone_id — часовой пояс пользователя. Не считай старые выполненные задачи без completedAt выполненными именно в эту неделю. Предложи реалистичный план, уточнив ограничения пользователя; не меняй даты автоматически.",mapOf("week_start" to "string","zone_id" to "string"),read=true) {args->WireJson.encodeToJsonElement(weekReview(store.list(identity.userId),LocalDate.parse(args.str("week_start")),ZoneId.of(args.str("zone_id"))))}
+    add("propose_week_plan","Сохранить ПРЕДЛОЖЕНИЕ плана недели для просмотра в Android. Даты задач этот инструмент НЕ меняет. moves: itemId, expectedVersion, dueDate, reason. Сначала get_week_review и текущие версии. Не предлагай удаление/выполнение. Применение возможно только через подтверждение пользователя в приложении.",mapOf("operation_id" to "string","title" to "string","week_start" to "string","summary" to "string","moves" to "array")) {args->
+        val moves=WireJson.decodeFromJsonElement<List<PlanMove>>(args.getValue("moves"))
+        create(args,WeekPlanContent(args.str("title"),args.str("week_start"),args.str("summary"),moves))
+    }
     add("create_task","Создать задачу по явной просьбе. operation_id — UUID, сохраняй при повторе. Дата YYYY-MM-DD, время HH:mm; не придумывай срок, если он не задан.",
         mapOf("operation_id" to "string","title" to "string","description" to "string","due_date" to "string","due_time" to "string","zone_id" to "string","reminder_minutes" to "integer"),listOf("operation_id","title")) { args ->
         create(args,TaskContent(args.str("title"),args.optional("description") ?: "",args.optional("due_date"),args.optional("due_time"),args.optional("zone_id") ?: "Europe/Moscow",args["reminder_minutes"]?.jsonPrimitive?.int))
@@ -56,7 +66,8 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
         val current = store.get(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Задача не найдена")
         val task = current.content as? TaskContent ?: throw IllegalArgumentException("Это не задача")
         require(!current.deleted)
-        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),task.copy(completed=args.getValue("completed").jsonPrimitive.boolean))))
+        val completed=args.getValue("completed").jsonPrimitive.boolean
+        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),task.copy(completed=completed,completedAt=if(completed)task.completedAt else null,completionDateUnknown=completed && task.completionDateUnknown))))
     }
     add("mark_habit","Записать или отменить выполнение привычки в конкретный день YYYY-MM-DD. Не отмечай будущие дни. Для existing mark передай expected_version из истории; для новой отметки — 0.",mapOf("habit_id" to "string","date" to "string","expected_version" to "integer","operation_id" to "string","completed" to "boolean")) { args ->
         val date = LocalDate.parse(args.str("date")); val parent = args.str("habit_id")

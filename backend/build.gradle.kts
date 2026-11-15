@@ -29,3 +29,10 @@ tasks.register<JavaExec>("runLocal") {
     mainClass.set("dev.habittracker.backend.LocalDevServerKt")
     workingDir(rootProject.projectDir)
 }
+tasks.register<JavaExec>("runFeatureTests") {
+    description = "Disposable loopback-only backend for Android acceptance tests; no user database or tunnel."
+    dependsOn(tasks.testClasses)
+    classpath=sourceSets.test.get().runtimeClasspath
+    mainClass.set("dev.habittracker.backend.FeatureTestServerKt")
+    workingDir(rootProject.projectDir)
+}

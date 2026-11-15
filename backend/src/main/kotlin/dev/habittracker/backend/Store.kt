@@ -117,7 +117,8 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         it.setString(1,userId); it.setString(2,id); it.executeQuery().use { r -> if(r.next()) r.item() else null }
     }
     private fun ResultSet.item() = Item(getString("id"),getLong("version"),WireJson.decodeFromString<Content>(getString("body")),getBoolean("deleted"),getTimestamp("updated_at").toInstant().toString(),getLong("sequence"))
-    fun mutate(userId: String, mutation: Mutation): MutationResult = tx { c ->
+    fun mutate(userId: String, mutation: Mutation): MutationResult = tx { c -> mutate(c,userId,mutation) }
+    private fun mutate(c: Connection,userId: String,mutation: Mutation,allowPlanApply: Boolean=false): MutationResult {
         UUID.fromString(mutation.operationId); UUID.fromString(mutation.itemId)
         require(mutation.baseVersion >= 0)
         // One account's sequence and operation journal advance in commit order.
@@ -129,14 +130,32 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         }
         if (replay != null) {
             if (replay.first != request) throw ApiFailure(409,"operationId уже использован с другими данными")
-            return@tx WireJson.decodeFromString<MutationResult>(replay.second)
+            return WireJson.decodeFromString<MutationResult>(replay.second)
         }
         val current = find(c,userId,mutation.itemId)
         val result = if ((current?.version ?: 0) != mutation.baseVersion) {
             MutationResult(mutation.operationId,MutationStatus.CONFLICT,current,"Запись изменена на другом устройстве")
         } else {
             mutation.content.validate()
+            val incomingPlan=mutation.content as? WeekPlanContent
+            if(incomingPlan!=null && !allowPlanApply) {
+                val previous=current?.content as? WeekPlanContent
+                require(incomingPlan.applied==(previous?.applied ?: false)) { "План применяется только через подтверждение в приложении" }
+                require(mutation.deleted || previous?.applied!=true || incomingPlan==previous) { "Применённый план нельзя изменить" }
+            }
+            if(!mutation.deleted) {
+                val org=mutation.content.organization
+                org.projectId?.let { require(find(c,userId,it)?.content is ProjectContent) { "Проект не найден в аккаунте" } }
+                org.goalId?.let { require((find(c,userId,it)?.content as? ProjectContent)?.isGoal==true) { "Цель не найдена в аккаунте" } }
+                org.linkedIds.forEach { require(it!=mutation.itemId && find(c,userId,it)?.content?.let {it !is HabitMarkContent}==true) { "Связанная запись не найдена в аккаунте" } }
+                (mutation.content as? WeekPlanContent)?.moves?.forEach { require(find(c,userId,it.itemId)?.content is TaskContent) { "В плане есть чужая или отсутствующая задача" } }
+            }
             require(current == null || current.content.typeName() == mutation.content.typeName()) { "Нельзя менять тип записи" }
+            val oldProject=current?.content as? ProjectContent;val newProject=mutation.content as? ProjectContent
+            if(!mutation.deleted && oldProject?.isGoal==true && newProject?.isGoal==false) {
+                val linked=c.prepareStatement("SELECT 1 FROM items WHERE user_id=?::uuid AND NOT deleted AND body->'organization'->>'goalId'=? LIMIT 1").use {p->p.setString(1,userId);p.setString(2,mutation.itemId);p.executeQuery().use {it.next()}}
+                require(!linked){"Сначала убери эту цель из связанных записей"}
+            }
             // A create followed by an offline delete must synchronize as a tombstone,
             // even when the server has never seen the active record.
             val mark = mutation.content as? HabitMarkContent
@@ -151,7 +170,11 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             val sequence = c.prepareStatement("UPDATE users SET revision=revision+1 WHERE id=?::uuid RETURNING revision").use {
                 it.setString(1,userId); it.executeQuery().use { r -> r.next(); r.getLong(1) }
             }
-            val item = Item(mutation.itemId,(current?.version ?: 0)+1,mutation.content,mutation.deleted,Instant.now().toString(),sequence)
+            val persisted=when(val content=mutation.content) {
+                is TaskContent->if(!content.completed) content.copy(completedAt=null,completionDateUnknown=false) else {val previous=current?.content as? TaskContent;content.copy(completedAt=if(content.completionDateUnknown)null else content.completedAt ?: if(previous?.completed==true)previous.completedAt else Instant.now().toString())}
+                else->content
+            }
+            val item = Item(mutation.itemId,(current?.version ?: 0)+1,persisted,mutation.deleted,Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS).toString(),sequence)
             c.prepareStatement("""INSERT INTO items(user_id,id,version,body,deleted,updated_at,sequence) VALUES (?::uuid,?::uuid,?,?::jsonb,?,?,?)
                 ON CONFLICT(user_id,id) DO UPDATE SET version=excluded.version,body=excluded.body,deleted=excluded.deleted,updated_at=excluded.updated_at,sequence=excluded.sequence""").use {
                 it.setString(1,userId); it.setString(2,item.id); it.setLong(3,item.version); it.setString(4,WireJson.encodeToString<Content>(item.content))
@@ -162,11 +185,32 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         c.prepareStatement("INSERT INTO operations VALUES (?::uuid,?::uuid,?,?)").use {
             it.setString(1,userId); it.setString(2,mutation.operationId); it.setString(3,request); it.setString(4,WireJson.encodeToString(result)); it.executeUpdate()
         }
-        result
+        return result
+    }
+    fun applyWeekPlan(userId: String,id: String,expectedVersion: Long): Item = tx { c ->
+        UUID.fromString(id)
+        c.prepareStatement("SELECT revision FROM users WHERE id=?::uuid FOR UPDATE").use {it.setString(1,userId);it.executeQuery().use {r->check(r.next())}}
+        val item=find(c,userId,id) ?: throw ApiFailure(404,"План не найден")
+        val plan=item.content as? WeekPlanContent ?: throw ApiFailure(400,"Это не план недели")
+        require(!item.deleted)
+        if(plan.applied) return@tx item
+        if(item.version!=expectedVersion) throw ApiFailure(409,"План изменился. Открой его заново.")
+        val tasks=plan.moves.map { move ->
+            val task=find(c,userId,move.itemId) ?: throw ApiFailure(409,"Задача из плана больше не существует")
+            if(task.deleted || task.version!=move.expectedVersion || (task.content as? TaskContent)?.completed!=false) throw ApiFailure(409,"Задачи изменились. Попроси ассистента обновить план; ничего не применено.")
+            task to move
+        }
+        tasks.forEach { (task,move)->
+            val operation=UUID.nameUUIDFromBytes("plan:$id:${item.version}:${task.id}".toByteArray()).toString()
+            val result=mutate(c,userId,Mutation(operation,task.id,task.version,(task.content as TaskContent).copy(dueDate=move.dueDate)))
+            check(result.status==MutationStatus.APPLIED)
+        }
+        val result=mutate(c,userId,Mutation(UUID.nameUUIDFromBytes("plan:$id:${item.version}:apply".toByteArray()).toString(),id,item.version,plan.copy(applied=true)),allowPlanApply=true)
+        requireNotNull(result.item)
     }
     fun sync(userId: String, request: SyncRequest): SyncResponse {
         require(request.cursor >= 0 && request.mutations.size <= 100)
-        val orderedResults = request.mutations.sortedBy { it.content is HabitMarkContent }.map { mutation ->
+        val orderedResults = request.mutations.sortedBy { when(it.content){is ProjectContent->0;is HabitMarkContent->2;is WeekPlanContent->3;else->1} }.map { mutation ->
             try { mutate(userId,mutation) } catch (e: IllegalArgumentException) {
                 MutationResult(mutation.operationId,MutationStatus.REJECTED,message=e.message ?: "Некорректная операция")
             }

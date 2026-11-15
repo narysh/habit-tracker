@@ -14,7 +14,8 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
 @Serializable data class SocialPoll(val id: String,val verifier: String)
 @Serializable data class SocialResult(val status: String,val session: Session? = null,val message: String? = null)
 
-@Serializable sealed interface Content { val title: String }
+@Serializable data class Organization(val projectId: String?=null,val goalId: String?=null,val tags: Set<String> = emptySet(),val linkedIds: Set<String> = emptySet())
+@Serializable sealed interface Content { val title: String; val organization: Organization get()=Organization() }
 @Serializable @SerialName("task") data class TaskContent(
     override val title: String,
     val description: String = "",
@@ -23,11 +24,15 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
     val zoneId: String = "Europe/Moscow",
     val reminderMinutes: Int? = null,
     val completed: Boolean = false,
+    val completedAt: String? = null,
+    override val organization: Organization = Organization(),
+    val completionDateUnknown: Boolean = false,
 ) : Content
 @Serializable @SerialName("note") data class NoteContent(
     override val title: String,
     val text: String = "",
     val attachmentIds: List<String> = emptyList(),
+    override val organization: Organization = Organization(),
 ) : Content
 @Serializable enum class HabitMode { WEEKDAYS, WEEKLY_TARGET }
 @Serializable @SerialName("habit") data class HabitContent(
@@ -39,7 +44,13 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
     val startsOn: String,
     val zoneId: String = "Europe/Moscow",
     val reminderTime: String? = null,
+    override val organization: Organization = Organization(),
 ) : Content
+
+@Serializable @SerialName("project") data class ProjectContent(override val title: String,val description: String="",val isGoal: Boolean=false) : Content
+@Serializable data class PlanMove(val itemId: String,val expectedVersion: Long,val dueDate: String,val reason: String="")
+@Serializable @SerialName("week_plan") data class WeekPlanContent(override val title: String,val weekStart: String,val summary: String,val moves: List<PlanMove>,val applied: Boolean=false) : Content
+@Serializable data class ApplyPlanRequest(val expectedVersion: Long)
 @Serializable @SerialName("habit_mark") data class HabitMarkContent(
     val habitId: String,
     val date: String,
@@ -73,6 +84,10 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
 
 fun Content.validate() {
     if (this !is HabitMarkContent) require(title.isNotBlank() && title.length <= 300) { "Название: от 1 до 300 символов" }
+    val org=organization
+    org.projectId?.let(UUID::fromString);org.goalId?.let(UUID::fromString)
+    require(org.tags.size<=30 && org.tags.all { it.isNotBlank() && it.length<=50 && it==it.trim() }) { "Теги: до 30 значений по 50 символов" }
+    require(org.linkedIds.size<=100);org.linkedIds.forEach(UUID::fromString)
     when (this) {
         is TaskContent -> {
             require(description.length <= 100_000)
@@ -80,6 +95,8 @@ fun Content.validate() {
             dueDate?.let(LocalDate::parse); dueTime?.let(LocalTime::parse)
             require(dueTime == null || dueDate != null) { "Для времени нужен день" }
             require(reminderMinutes == null || (dueDate != null && dueTime != null && reminderMinutes in 0..10080)) { "Напоминание требует даты и времени" }
+            completedAt?.let { require(completed);Instant.parse(it) }
+            require(!completionDateUnknown || (completed && completedAt==null))
         }
         is NoteContent -> {
             require(text.length <= 1_000_000); require(attachmentIds.size <= 30)
@@ -94,10 +111,18 @@ fun Content.validate() {
             if (mode == HabitMode.WEEKDAYS) require(weekdays.isNotEmpty()) { "Выбери дни недели" }
         }
         is HabitMarkContent -> { UUID.fromString(habitId); LocalDate.parse(date); require(title.isEmpty()) }
+        is ProjectContent -> require(description.length<=100_000)
+        is WeekPlanContent -> {
+            val monday=LocalDate.parse(weekStart);require(monday.dayOfWeek==DayOfWeek.MONDAY)
+            require(summary.length<=100_000 && moves.size<=100 && moves.map {it.itemId}.distinct().size==moves.size)
+            moves.forEach { UUID.fromString(it.itemId);require(it.expectedVersion>0 && it.reason.length<=2000);require(LocalDate.parse(it.dueDate) in monday..monday.plusDays(6)) }
+        }
     }
 }
 fun markId(habitId: String, date: LocalDate): String = UUID.nameUUIDFromBytes("habit:$habitId:$date".toByteArray(Charsets.UTF_8)).toString()
-fun Content.typeName(): String = when (this) { is TaskContent -> "task"; is NoteContent -> "note"; is HabitContent -> "habit"; is HabitMarkContent -> "habit_mark" }
+fun Content.typeName(): String = when (this) { is TaskContent -> "task"; is NoteContent -> "note"; is HabitContent -> "habit"; is HabitMarkContent -> "habit_mark"; is ProjectContent->"project";is WeekPlanContent->"week_plan" }
+fun Content.withOrganization(value: Organization): Content=when(this){is TaskContent->copy(organization=value);is NoteContent->copy(organization=value);is HabitContent->copy(organization=value);else->this}
+fun Content.searchableText(): String = listOf(title,when(this){is TaskContent->description;is NoteContent->text;is HabitContent->description;is ProjectContent->description;is WeekPlanContent->summary;else->""},organization.tags.joinToString(" ")).joinToString(" ")
 
 fun HabitContent.isDue(date: LocalDate): Boolean = date >= LocalDate.parse(startsOn) &&
     (mode == HabitMode.WEEKLY_TARGET || date.dayOfWeek.value in weekdays)

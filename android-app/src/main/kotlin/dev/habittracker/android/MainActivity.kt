@@ -32,6 +32,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.habittracker.shared.*
@@ -43,8 +46,15 @@ import java.util.Locale
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+    private fun receive(intent: Intent) {
+        val app=application as HabitApplication
+        if(intent.getBooleanExtra("quick",false))app.shortcut.value=true
+        if(intent.action==Intent.ACTION_SEND || intent.action==Intent.ACTION_SEND_MULTIPLE) lifecycleScope.launch(Dispatchers.IO) {try {app.shareInbox.receive(intent)}catch(e:Exception){app.shareInbox.error.value=e.message ?: "Не удалось принять данные"}}
+    }
+    override fun onNewIntent(intent: Intent){super.onNewIntent(intent);setIntent(intent);receive(intent)}
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); enableEdgeToEdge()
+        if(savedInstanceState==null)receive(intent)
         setContent {
             val colors=if(isSystemInDarkTheme()) darkColorScheme(primary=Color(0xFF8ED5B0),primaryContainer=Color(0xFF155038),onPrimaryContainer=Color(0xFFB6F2D1),secondary=Color(0xFFB5CCBE),secondaryContainer=Color(0xFF354B3E),onSecondaryContainer=Color(0xFFD4E8D8),surfaceContainer=Color(0xFF1B2620),surfaceContainerHighest=Color(0xFF2D3A32)) else lightColorScheme(primary=Color(0xFF24694D),primaryContainer=Color(0xFFD5EDDE),onPrimaryContainer=Color(0xFF123D29),secondary=Color(0xFF546B5F),secondaryContainer=Color(0xFFE0ECE0),onSecondaryContainer=Color(0xFF284533),background=Color(0xFFF7F9F5),surface=Color(0xFFF7F9F5),surfaceContainer=Color(0xFFECF2EA),surfaceContainerHighest=Color(0xFFE5EEE5))
             MaterialTheme(colorScheme=colors) { TrackerApp() }
@@ -63,6 +73,8 @@ private fun Content.description(): String = when(this) {
     is NoteContent -> "$title\n$text\nВложений: ${attachmentIds.size}"
     is HabitContent -> "$title\n$description\n${if(mode==HabitMode.WEEKLY_TARGET) "$targetPerWeek дней в неделю" else weekdays.sorted().joinToString { listOf("Пн","Вт","Ср","Чт","Пт","Сб","Вс")[it-1] }}\nНачало: ${localDate(startsOn)}\nНапоминание: ${reminderTime ?: "выключено"}"
     is HabitMarkContent -> "${localDate(date)}: ${if(completed) "выполнено" else "не выполнено"}"
+    is ProjectContent -> "$title\n$description"
+    is WeekPlanContent -> "$title\n$summary"
 }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun TrackerApp(vm: AppViewModel=viewModel()) {
@@ -87,6 +99,9 @@ private fun Content.description(): String = when(this) {
     var settings by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
     var socialSettings by remember { mutableStateOf(false) }
+    var feature by remember { mutableStateOf<String?>(null) }
+    var more by remember { mutableStateOf(false) }
+    var selectedPlan by remember { mutableStateOf<Item?>(null) }
     var editor by remember { mutableStateOf<Pair<String,Content>?>(null) }
     var deleting by remember { mutableStateOf<Item?>(null) }
     var history by remember { mutableStateOf<Item?>(null) }
@@ -95,6 +110,16 @@ private fun Content.description(): String = when(this) {
     val now by produceState(LocalDate.now()) { while(true) { value=LocalDate.now(); kotlinx.coroutines.delay(30000) } }
     val permission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(session?.userId) { if(session!=null && Build.VERSION.SDK_INT>=33) permission.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    val incoming by vm.app.shareInbox.drafts.collectAsStateWithLifecycle()
+    val shareError by vm.app.shareInbox.error.collectAsStateWithLifecycle()
+    val shortcut by vm.app.shortcut.collectAsStateWithLifecycle()
+    val backupPreview by vm.backupPreview.collectAsStateWithLifecycle()
+    val reminderOptions by vm.reminderSettings.collectAsStateWithLifecycle()
+    LaunchedEffect(shareError){shareError?.let {vm.message.value=it;vm.app.shareInbox.error.value=null}}
+    LaunchedEffect(shortcut,session?.userId){if(shortcut && session!=null){feature="quick";vm.app.shortcut.value=false}}
+    val exportPicker=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")){uri->uri?.let {vm.exportBackup(it)}}
+    val importPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->uri?.let {vm.inspectBackup(it)}}
+    fun openRecord(item: Item){feature=null;if(item.content is WeekPlanContent)selectedPlan=item else editor=item.id to item.content}
     val visible=records.filterNot { it.deleted }
     val tasks=visible.filter { it.content is TaskContent }.sortedWith(compareBy<Item> { (it.content as TaskContent).completed }.thenBy { (it.content as TaskContent).dueDate ?: "9999" })
     val habits=visible.filter { it.content is HabitContent }
@@ -107,7 +132,7 @@ private fun Content.description(): String = when(this) {
     }
     Scaffold(
         snackbarHost={ SnackbarHost(snackbar) },
-        topBar={ if(session!=null) TopAppBar(title={ Column { Text(if(tab==0) "Сегодня" else listOf("Сегодня","Задачи","Привычки","Заметки")[tab],fontWeight=FontWeight.Bold); Text(now.format(DateTimeFormatter.ofPattern("d MMMM, EEEE",Locale.forLanguageTag("ru"))),style=MaterialTheme.typography.labelMedium) } },actions={ IconButton(onClick={vm.synchronize()},enabled=!busy) { Icon(Icons.Outlined.Sync,"Синхронизировать") }; IconButton(onClick={settings=true}) { Icon(Icons.Outlined.Settings,"Настройки") } }) },
+        topBar={ if(session!=null) TopAppBar(title={ Column { Text(if(tab==0) "Сегодня" else listOf("Сегодня","Задачи","Привычки","Заметки")[tab],fontWeight=FontWeight.Bold); Text(now.format(DateTimeFormatter.ofPattern("d MMMM, EEEE",Locale.forLanguageTag("ru"))),style=MaterialTheme.typography.labelMedium) } },actions={ IconButton(onClick={vm.synchronize()},enabled=!busy) { Icon(Icons.Outlined.Sync,"Синхронизировать") }; IconButton(onClick={more=true}) { Icon(Icons.Outlined.MoreVert,"Возможности") }; DropdownMenu(more,{more=false}) { listOf("quick" to "Быстрый ввод","week" to "План недели","search" to "Поиск и фильтры","projects" to "Проекты и цели","stats" to "Статистика привычек","review" to "Разбор недели с AI","backup" to "Резервные копии","reminders" to "Напоминания").forEach { (id,label)->DropdownMenuItem(text={Text(label)},onClick={feature=id;more=false}) } }; IconButton(onClick={settings=true}) { Icon(Icons.Outlined.Settings,"Настройки") } }) },
         bottomBar={ if(session!=null) NavigationBar { listOf("Сегодня","Задачи","Привычки","Заметки").forEachIndexed { index,label ->
             NavigationBarItem(selected=tab==index,onClick={tab=index},icon={ Icon(listOf(Icons.Outlined.Today,Icons.Outlined.Checklist,Icons.Outlined.Loop,Icons.Outlined.Notes)[index],label) },label={Text(label)})
         } } },
@@ -128,6 +153,7 @@ private fun Content.description(): String = when(this) {
                 item { Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.primaryContainer)) {
                     Column(Modifier.fillMaxWidth().padding(22.dp)) { Text("Твой день — в твоём ритме",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold); Spacer(Modifier.height(8.dp)); Text("${countLabel(tasks.count { !(it.content as TaskContent).completed },"задача","задачи","задач")} в работе · ${countLabel(habits.size,"привычка","привычки","привычек")}") }
                 } }
+                item { Row { TextButton(onClick={feature="quick"}) {Text("Быстрый ввод")}; TextButton(onClick={feature="week"}) {Text("План недели")} } }
                 item { SectionTitle("На сегодня") }
                 val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && (task.dueDate==null || LocalDate.parse(task.dueDate)<=now) }
                 if(todayTasks.isEmpty()) item { EmptyState("Нет незавершённых задач на сегодня") }
@@ -155,13 +181,25 @@ private fun Content.description(): String = when(this) {
             }
         }
     }
+    if(session!=null) when(feature) {
+        "quick"->QuickEntryDialog({feature=null}){draft->feature=null;editor=UUID.randomUUID().toString() to draft}
+        "projects"->ProjectsDialog(records,{feature=null},{openRecord(it)}){goal->feature=null;editor=UUID.randomUUID().toString() to ProjectContent("",isGoal=goal)}
+        "search"->SearchDialog(records,{feature=null},{openRecord(it)})
+        "week"->WeekDialog(records,{feature=null},{openRecord(it)}){item,date->val task=item.content as TaskContent;vm.save(task.copy(dueDate=date.toString()),item.id)}
+        "stats"->StatisticsDialog(records){feature=null}
+        "review"->ReviewDialog(records,{feature=null}){selectedPlan=it}
+        "reminders"->ReminderSettingsDialog(reminderOptions,{feature=null}){value->vm.saveReminderSettings(value){feature=null}}
+        "backup"->BackupDialog(backupPreview,busy,{feature=null},{exportPicker.launch("habit-tracker-${LocalDate.now()}.zip")},{importPicker.launch(arrayOf("application/zip","application/octet-stream","application/x-zip-compressed"))},{vm.restoreBackup()},{vm.cancelBackup()})
+    }
+    selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
+    if(session!=null && editor==null && selectedPlan==null && feature==null) incoming.firstOrNull()?.let {draft->ShareDraftDialog(draft,busy,{value,asTask->vm.acceptShare(value,asTask)},{vm.app.shareInbox.remove(draft.id)})}
     if(chooser) AlertDialog(onDismissRequest={chooser=false},title={Text("Добавить")},text={Column { listOf("Задачу","Привычку","Заметку").forEachIndexed { index,label -> TextButton(onClick={chooser=false;newItem(index+1)}) { Text(label) } } }},confirmButton={TextButton(onClick={chooser=false}) {Text("Закрыть")}})
-    editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null}) }
+    editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)}) }
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
     if(connection) ConnectionDialog(vm) { connection=false }
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
@@ -256,9 +294,9 @@ private fun Content.description(): String = when(this) {
     val count=(ChronoUnit.DAYS.between(LocalDate.parse(habit.startsOn),today)+1).coerceIn(0,100000).toInt()
     AlertDialog(onDismissRequest=close,title={Text("История: ${habit.title}")},text={LazyColumn(Modifier.heightIn(max=420.dp)) { items(count) { index -> val date=today.minusDays(index.toLong()); Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) { Text(date.format(dateFormat),Modifier.weight(1f)); if(habit.isDue(date)) Checkbox(date.toString() in marks,{mark(date,it)}) else Text("Выходной",style=MaterialTheme.typography.labelSmall) } } }},confirmButton={TextButton(onClick=close) {Text("Готово")}})
 }
-@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit) {
+@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit) {
     var title by remember(id) { mutableStateOf(initial.title) }
-    var body by remember(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; else -> "" }) }
+    var body by remember(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; is ProjectContent -> initial.description; else -> "" }) }
     var date by remember(id) { mutableStateOf(localDate((initial as? TaskContent)?.dueDate)) }
     var time by remember(id) { mutableStateOf((initial as? TaskContent)?.dueTime.orEmpty()) }
     var reminder by remember(id) { mutableStateOf((initial as? TaskContent)?.reminderMinutes?.toString().orEmpty()) }
@@ -267,6 +305,8 @@ private fun Content.description(): String = when(this) {
     var target by remember(id) { mutableStateOf(((initial as? HabitContent)?.targetPerWeek ?: 3).toString()) }
     var starts by remember(id) { mutableStateOf(localDate((initial as? HabitContent)?.startsOn ?: LocalDate.now().toString())) }
     var habitTime by remember(id) { mutableStateOf((initial as? HabitContent)?.reminderTime.orEmpty()) }
+    var organization by remember(id) { mutableStateOf(initial.organization) }
+    var goal by remember(id) { mutableStateOf((initial as? ProjectContent)?.isGoal ?: false) }
     var error by remember { mutableStateOf<String?>(null) }
     val context=androidx.compose.ui.platform.LocalContext.current
     val currentItems by vm.items.collectAsStateWithLifecycle()
@@ -274,13 +314,16 @@ private fun Content.description(): String = when(this) {
         is TaskContent -> initial.copy(title=title.trim(),description=body,dueDate=parseDate(date),dueTime=time.trim().ifBlank { null },reminderMinutes=reminder.trim().takeIf(String::isNotEmpty)?.toInt())
         is NoteContent -> (currentItems.firstOrNull { it.id==id }?.content as? NoteContent ?: initial).copy(title=title.trim(),text=body)
         is HabitContent -> initial.copy(title=title.trim(),description=body,mode=mode,weekdays=days,targetPerWeek=target.toInt(),startsOn=requireNotNull(parseDate(starts)),reminderTime=habitTime.trim().ifBlank { null })
+        is ProjectContent -> initial.copy(title=title.trim(),description=body,isGoal=goal)
         else -> initial
-    }
+    }.withOrganization(organization)
     fun submit(after: ()->Unit) { try { val value=content();value.validate();vm.save(value,id,after) } catch(e: Exception) { error=e.message ?: "Проверь поля формы" } }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.attach(id,it) } }
-    AlertDialog(onDismissRequest=close,title={Text(if(initial is TaskContent) "Задача" else if(initial is HabitContent) "Привычка" else "Заметка")},text={Column(Modifier.heightIn(max=500.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+    AlertDialog(onDismissRequest=close,title={Text(if(initial is TaskContent) "Задача" else if(initial is HabitContent) "Привычка" else if(initial is ProjectContent) "Проект или цель" else "Заметка")},text={Column(Modifier.heightIn(max=500.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(title,{title=it},label={Text("Название")},modifier=Modifier.fillMaxWidth())
         OutlinedTextField(body,{body=it},label={Text(if(initial is NoteContent) "Текст" else "Описание")},minLines=3,modifier=Modifier.fillMaxWidth())
+        if(initial is ProjectContent) Row(verticalAlignment=Alignment.CenterVertically) { Switch(goal,{goal=it});Text("Это цель") }
+        if(initial !is ProjectContent) OrganizationFields(organization,id,currentItems,{organization=it}) {item->submit {close();openLinked(item)}}
         if(initial is TaskContent) {
             OutlinedTextField(date,{date=it},label={Text("Дата · дд.мм.гггг")},singleLine=true,modifier=Modifier.fillMaxWidth())
             OutlinedTextField(time,{time=it},label={Text("Время · чч:мм, необязательно")},singleLine=true,modifier=Modifier.fillMaxWidth())
