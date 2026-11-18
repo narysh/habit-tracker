@@ -1,7 +1,7 @@
 FROM gradle:9.4.1-jdk21 AS build
 WORKDIR /workspace
 COPY . .
-RUN gradle :backend:installDist --no-daemon
+RUN gradle -PbackendOnly=true :backend:installDist --no-daemon
 FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=build /workspace/backend/build/install/backend /app
