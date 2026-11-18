@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>Задача в Habit Tracker</title>
+  <style>
+    :root { color-scheme: light dark; font: 17px system-ui, sans-serif; }
+    body { margin: 0; padding: 28px 20px; }
+    main { max-width: 540px; margin: 24px auto; }
+    h1 { font-size: 1.55rem; }
+    .button { display: inline-block; background: #24694d; color: white; padding: 13px 18px; border-radius: 12px; }
+    #task-title { overflow-wrap: anywhere; }
+    a { text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Черновик задачи</h1>
+    <p id="status" role="status">Открой ссылку на задачу из ChatGPT.</p>
+    <p id="task-title"></p>
+    <a id="open" class="button" hidden>Открыть в Habit Tracker</a>
+    <p>Если приложение не открывается, скачай <a href="https://github.com/narysh/habit-tracker/releases/tag/v0.5.0-preview.1">версию с импортом по ссылке</a> и попробуй снова.</p>
+  </main>
+  <script src="task.js" defer></script>
+</body>
+</html>
