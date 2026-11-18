@@ -50,6 +50,12 @@ class MainActivity : ComponentActivity() {
         val app=application as HabitApplication
         if(intent.getBooleanExtra("quick",false))app.shortcut.value=true
         if(intent.action==Intent.ACTION_SEND || intent.action==Intent.ACTION_SEND_MULTIPLE) lifecycleScope.launch(Dispatchers.IO) {try {app.shareInbox.receive(intent)}catch(e:Exception){app.shareInbox.error.value=e.message ?: "Не удалось принять данные"}}
+        if (intent.action == Intent.ACTION_VIEW) intent.dataString?.let { link ->
+            lifecycleScope.launch(Dispatchers.IO) {
+                try { app.shareInbox.receiveTaskLink(link) }
+                catch (e: Exception) { app.shareInbox.error.value = e.message ?: "Не удалось открыть черновик задачи" }
+            }
+        }
     }
     override fun onNewIntent(intent: Intent){super.onNewIntent(intent);setIntent(intent);receive(intent)}
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -193,7 +199,11 @@ private fun Content.description(): String = when(this) {
         "backup"->BackupDialog(backupPreview,busy,{feature=null},{exportPicker.launch("habit-tracker-${LocalDate.now()}.zip")},{importPicker.launch(arrayOf("application/zip","application/octet-stream","application/x-zip-compressed"))},{vm.restoreBackup()},{vm.cancelBackup()})
     }
     selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
-    if(session!=null && editor==null && selectedPlan==null && feature==null) incoming.firstOrNull()?.let {draft->ShareDraftDialog(draft,busy,{value,asTask->vm.acceptShare(value,asTask)},{vm.app.shareInbox.remove(draft.id)})}
+    if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.let { draft ->
+        val task = draft.task
+        if (task == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
+        else Editor(draft.id, task, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) })
+    }
     if(chooser) AlertDialog(onDismissRequest={chooser=false},title={Text("Добавить")},text={Column { listOf("Задачу","Привычку","Заметку").forEachIndexed { index,label -> TextButton(onClick={chooser=false;newItem(index+1)}) { Text(label) } } }},confirmButton={TextButton(onClick={chooser=false}) {Text("Закрыть")}})
     editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)}) }
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }

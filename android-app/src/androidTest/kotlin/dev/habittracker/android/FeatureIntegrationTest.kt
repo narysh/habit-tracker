@@ -27,6 +27,27 @@ class FeatureIntegrationTest {
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@feature.android.test","test-password-123"))
         app.preferences.automatic(false);app.preferences.save(session,TestServer.url);return session
     }
+    @Test fun taskLinkOpensEditableDraftAndOnlySavesOnConfirmation() = runBlocking(Dispatchers.IO) {
+        val session = account()
+        val repo = Repository(app, session, false)
+        app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        val link = Uri.parse("habittracker://import/task?title=Draft%20from%20ChatGPT&date=2027-01-20&time=18%3A00")
+        val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
+        assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            compose.waitUntil(20000) { compose.onAllNodesWithText("Draft from ChatGPT").fetchSemanticsNodes().isNotEmpty() }
+            val draft = app.shareInbox.drafts.value.single()
+            assertNull(repo.dao.item(draft.id))
+            compose.onNodeWithText("Сохранить").performClick()
+            withTimeout(15000) { while (repo.dao.item(draft.id) == null) delay(100) }
+            val task = WireJson.decodeFromString<Item>(checkNotNull(repo.dao.item(draft.id)).localJson).content as TaskContent
+            assertEquals("Draft from ChatGPT", task.title)
+            assertEquals("2027-01-20", task.dueDate)
+            assertEquals("18:00", task.dueTime)
+            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+        }
+        repo.database.close()
+    }
     @Test fun existingRoomDatabaseOpensWithBundledDriverWithoutLosingOutbox()=runBlocking(Dispatchers.IO) {
         val key="driver-migration-${UUID.randomUUID()}";val id=UUID.randomUUID().toString()
         val item=Item(id,0,TaskContent("Сохранено в старой версии"),false,Instant.now().toString(),0)

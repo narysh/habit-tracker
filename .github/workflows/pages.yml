@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-      - name: Prepare callback routes
+      - name: Prepare callback and task routes
         run: |
           mkdir -p _site
           cp web/callback.html _site/index.html
@@ -28,6 +28,9 @@ jobs:
             mkdir -p "_site/auth/social/$provider/callback"
             cp web/callback.html "_site/auth/social/$provider/callback/index.html"
           done
+          mkdir -p _site/task
+          cp web/task.html _site/task/index.html
+          cp web/task.js _site/task/task.js
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
