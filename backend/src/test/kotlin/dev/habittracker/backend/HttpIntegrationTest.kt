@@ -103,4 +103,78 @@ class HttpIntegrationTest {
         assertTrue(WireJson.parseToJsonElement(rpc.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
         assertTrue(store.list(account.userId).isEmpty())
     }
+    @Test fun `public plugin accepts only its own OAuth grant and syncs a task to the same Android account`() = testApplication {
+        val plugin = settings.copy(
+            publicUrl = "https://tracker.example.test",
+            clientId = "habit-tracker-chatgpt",
+            redirects = setOf("https://chatgpt.com/connector_platform_oauth_redirect"),
+            publicPlugin = true,
+            openAiDomainChallenge = "test-challenge"
+        )
+        application { backendModule(plugin, store) }
+        val credentials = Credentials("${UUID.randomUUID()}@plugin.test", "test-password-123")
+        val owner = store.register(credentials)
+        val other = user()
+        val identity = checkNotNull(store.authenticate(owner.token))
+        val wrongAudience = store.issueOAuth(identity, plugin.clientId, "https://elsewhere.example.test/mcp")
+        val wrongClient = store.issueOAuth(identity, "desktop", plugin.resource)
+        val noRedirects = createClient { followRedirects = false }
+        val verifier = "v".repeat(43)
+        val redirect = plugin.redirects.single()
+        val authorization = mapOf(
+            "client_id" to plugin.clientId, "redirect_uri" to redirect, "response_type" to "code",
+            "state" to "plugin-test", "code_challenge" to challenge(verifier), "code_challenge_method" to "S256",
+            "resource" to plugin.resource, "scope" to "tracker:read tracker:write"
+        )
+        val page = noRedirects.get("/oauth/authorize") { url { authorization.forEach { (key, value) -> parameters.append(key, value) } } }
+        assertEquals(HttpStatusCode.OK, page.status)
+        val nonce = checkNotNull(Regex("name=\"nonce\" value=\"([^\"]+)\"").find(page.bodyAsText())).groupValues[1]
+        val consent = noRedirects.post("/oauth/consent") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("nonce" to nonce, "email" to credentials.email, "password" to credentials.password, "decision" to "allow").formUrlEncode())
+        }
+        assertEquals(HttpStatusCode.Found, consent.status)
+        val callback = Url(checkNotNull(consent.headers[HttpHeaders.Location]))
+        assertEquals("chatgpt.com", callback.host)
+        assertEquals(plugin.publicUrl, callback.parameters["iss"])
+        assertEquals("plugin-test", callback.parameters["state"])
+        val exchange = noRedirects.post("/oauth/token") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("client_id" to plugin.clientId, "client_secret" to plugin.clientSecret,
+                "grant_type" to "authorization_code", "redirect_uri" to redirect, "resource" to plugin.resource,
+                "code" to checkNotNull(callback.parameters["code"]), "code_verifier" to verifier).formUrlEncode())
+        }
+        assertEquals(HttpStatusCode.OK, exchange.status, exchange.bodyAsText())
+        val allowed = WireJson.decodeFromString<OAuthTokens>(exchange.bodyAsText())
+        suspend fun rpc(token: String, body: String) = client.post("/mcp") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Host, "tracker.example.test")
+            header(HttpHeaders.Accept, "application/json, text/event-stream")
+            setBody(body)
+        }
+        val listRequest = """{"jsonrpc":"2.0","id":1,"method":"tools/list"}"""
+        for (token in listOf(owner.token, wrongAudience.accessToken, wrongClient.accessToken)) {
+            assertEquals(HttpStatusCode.Unauthorized, rpc(token, listRequest).status)
+        }
+        assertEquals("test-challenge", client.get("/.well-known/openai-apps-challenge").bodyAsText())
+        val catalog = rpc(allowed.accessToken, listRequest)
+        assertEquals(HttpStatusCode.OK, catalog.status, catalog.bodyAsText())
+        val tools = WireJson.parseToJsonElement(catalog.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("tools").jsonArray
+        assertEquals(setOf("create_task", "get_tasks", "complete_task"), tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/v1/items") { bearerAuth(allowed.accessToken) }.status)
+        val create = rpc(allowed.accessToken, """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_task","arguments":{"operation_id":"${UUID.randomUUID()}","title":"С телефона"}}}""")
+        assertEquals(HttpStatusCode.OK, create.status, create.bodyAsText())
+        assertFalse(WireJson.parseToJsonElement(create.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
+        suspend fun sync(token: String) = client.post("/api/v1/sync") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"operations":[],"cursor":0}""")
+        }.let { response ->
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            WireJson.decodeFromString<SyncResponse>(response.bodyAsText())
+        }
+        assertEquals("С телефона", sync(owner.token).changes.single().content.title)
+        assertTrue(sync(other.token).changes.isEmpty())
+    }
 }

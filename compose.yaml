@@ -23,10 +23,12 @@ services:
       JDBC_URL: jdbc:postgresql://postgres:5432/habit_tracker
       DB_USER: habit_tracker
       DB_PASSWORD: ${DB_PASSWORD}
-      MCP_CLIENT_ID: habit-tracker
+      MCP_CLIENT_ID: ${MCP_CLIENT_ID:-habit-tracker}
       MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET:?Set MCP_CLIENT_SECRET in .env}
       MCP_REDIRECT_URIS: ${MCP_REDIRECT_URIS:-http://127.0.0.1:45838/callback}
       PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:8081}
+      PUBLIC_CHATGPT_PLUGIN: ${PUBLIC_CHATGPT_PLUGIN:-false}
+      OPENAI_APPS_CHALLENGE: ${OPENAI_APPS_CHALLENGE:-}
       FILES_DIR: /data/files
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -36,7 +38,7 @@ services:
       SOCIAL_CALLBACK_BASE: ${SOCIAL_CALLBACK_BASE:-https://narysh.github.io/habit-tracker}
       ANDROID_PUBLIC_URL: ${ANDROID_PUBLIC_URL:-}
     ports:
-      - "8081:8081"
+      - "${BACKEND_BIND:-0.0.0.0}:8081:8081"
     volumes:
       - attachment-data:/data/files
     depends_on:

@@ -57,6 +57,8 @@ APK: `android-app/build/outputs/apk/debug/android-app-debug.apk`. При пут�
 
 ## Подключение AI в локальном приложении ChatGPT / Codex
 
+Для распространения среди пользователей см. [публичный плагин для ChatGPT](docs/CHATGPT_PLUGIN.md).
+
 Основной сервер **не использует** отдельное тестовое хранилище `mcp-probe`: REST и MCP читают одну PostgreSQL-базу и один аккаунт.
 
 ```powershell

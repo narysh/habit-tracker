@@ -85,9 +85,38 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         } }
         return Session(token,identity.userId,identity.email,expiry.toString())
     }
-    fun authenticate(token: String): Identity? = pool.connection.use { c -> c.prepareStatement(
-        "SELECT u.id,u.email,s.scopes FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>now()"
-    ).use { it.setString(1,digest(token)); it.executeQuery().use { r -> if(r.next()) Identity(r.getString(1),r.getString(2),r.getString(3).split(' ').toSet()) else null } } }
+    fun authenticate(token: String, appSessionOnly: Boolean = false): Identity? = pool.connection.use { c -> c.prepareStatement(
+        """SELECT u.id,u.email,s.scopes FROM sessions s JOIN users u ON u.id=s.user_id
+            WHERE s.token_hash=? AND s.expires_at>now()
+            AND (NOT ? OR NOT EXISTS (SELECT 1 FROM oauth_refresh_tokens r WHERE r.access_hash=s.token_hash))"""
+    ).use { it.setString(1,digest(token)); it.setBoolean(2,appSessionOnly); it.executeQuery().use { r -> if(r.next()) Identity(r.getString(1),r.getString(2),r.getString(3).split(' ').toSet()) else null } } }
+    fun authenticatePlugin(token: String, clientId: String, resource: String): Identity? = pool.connection.use { c ->
+        c.prepareStatement("""
+            SELECT u.id, u.email, s.scopes FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            JOIN oauth_refresh_tokens r ON r.access_hash = s.token_hash AND r.user_id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at > now() AND r.client_id = ? AND r.resource = ?
+        """.trimIndent()).use { statement ->
+            statement.setString(1, digest(token))
+            statement.setString(2, clientId)
+            statement.setString(3, resource)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) Identity(rows.getString(1), rows.getString(2), rows.getString(3).split(' ').toSet()) else null
+            }
+        }
+    }
+    fun revokeOAuth(token: String, clientId: String, resource: String) = tx { c ->
+        val hash = digest(token)
+        c.prepareStatement("""DELETE FROM sessions WHERE token_hash IN (
+            SELECT access_hash FROM oauth_refresh_tokens WHERE client_id=? AND resource=?
+            AND (access_hash=? OR token_hash=?))""").use { statement ->
+            statement.setString(1, clientId)
+            statement.setString(2, resource)
+            statement.setString(3, hash)
+            statement.setString(4, hash)
+            statement.executeUpdate()
+        }
+    }
     fun revoke(token: String) { tx { c ->
         val hash=digest(token)
         val access=c.prepareStatement("SELECT access_hash FROM oauth_refresh_tokens WHERE token_hash=?").use { it.setString(1,hash); it.executeQuery().use { r -> if(r.next()) r.getString(1) else null } }

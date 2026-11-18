@@ -15,7 +15,9 @@ import java.util.UUID
 
 fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
     val server = Server(Implementation("habit-tracker","0.4.0"),ServerOptions(capabilities=ServerCapabilities(tools=ServerCapabilities.Tools(listChanged=false))))
+    val publicTools = setOf("get_tasks", "create_task", "complete_task")
     fun add(name: String, description: String, fields: Map<String,String> = emptyMap(), required: List<String> = fields.keys.toList(), read: Boolean = false, destructive: Boolean = false, action: (JsonObject) -> JsonElement) {
+        if (settings.publicPlugin && name !in publicTools) return
         server.addTool(name=name,description=description,inputSchema=ToolSchema(properties=buildJsonObject {
             fields.forEach { (name,type) -> putJsonObject(name) { put("type",type); if(type == "array") putJsonObject("items") {
                 if(name=="moves") {put("type","object");putJsonObject("properties") {putJsonObject("itemId"){put("type","string")};putJsonObject("expectedVersion"){put("type","integer")};putJsonObject("dueDate"){put("type","string")};putJsonObject("reason"){put("type","string")}};put("required",JsonArray(listOf("itemId","expectedVersion","dueDate").map(::JsonPrimitive)))}
@@ -77,6 +79,7 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
         val current = store.get(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Запись не найдена")
         WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),current.content,true)))
     }
+    if (settings.publicPlugin) return server
     server.addTool(name="get_attachment",description="Получить ОДНО выбранное вложение только по отдельному явному запросу пользователя. Не загружай все вложения автоматически. Возвращает метаданные и MCP image/resource; обработка формата зависит от клиента.",
         inputSchema=ToolSchema(properties=buildJsonObject {putJsonObject("id") {put("type","string")}},required=listOf("id")),
         toolAnnotations=ToolAnnotations(readOnlyHint=true,destructiveHint=false,idempotentHint=true,openWorldHint=false)) { request -> withContext(Dispatchers.IO) {

@@ -60,7 +60,12 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             val path = call.request.path()
             if(path == "/mcp" || (path.startsWith("/api/v1/") && !path.startsWith("/api/v1/auth/social/") && path !in setOf("/api/v1/auth/register","/api/v1/auth/login"))) {
                 val token = call.request.header(HttpHeaders.Authorization)?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ").orEmpty()
-                val identity = withContext(Dispatchers.IO) { store.authenticate(token) }
+                val identity = withContext(Dispatchers.IO) {
+                    when {
+                        settings.publicPlugin && path == "/mcp" -> store.authenticatePlugin(token, settings.clientId, settings.resource)
+                        else -> store.authenticate(token, appSessionOnly = settings.publicPlugin)
+                    }
+                }
                 if(identity == null) {
                     call.response.header(HttpHeaders.WWWAuthenticate,"Bearer resource_metadata=\"${settings.publicUrl}/.well-known/oauth-protected-resource\", scope=\"tracker:read tracker:write\"")
                     throw ApiFailure(401,"Войди в аккаунт")
@@ -72,6 +77,10 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         }
     })
     routing {
+        get("/.well-known/openai-apps-challenge") {
+            val challenge = settings.openAiDomainChallenge ?: throw ApiFailure(404, "Challenge not configured")
+            call.respondText(challenge, ContentType.Text.Plain)
+        }
         get("/connection/proof") {
             val publicAddress=System.getenv("ANDROID_PUBLIC_URL")?.takeIf { it.isNotBlank() } ?: runCatching { Files.readString(java.nio.file.Path.of(".local/backend-public-url.txt")).trim() }.getOrDefault("")
             require(URI(publicAddress).scheme=="https") { "Публичный адрес ещё не опубликован" }
@@ -86,13 +95,13 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         route("/api/v1") {
             get("/auth/social/providers") {
                 val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
-                call.respond(withContext(Dispatchers.IO) { social.providers(store.authenticate(token)) })
+                call.respond(withContext(Dispatchers.IO) { social.providers(store.authenticate(token, appSessionOnly = settings.publicPlugin)) })
             }
             post("/auth/social/start") {
                 throttle.check(call.request.local.remoteHost)
                 val request=call.receive<SocialStart>()
                 val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
-                call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token),token) })
+                call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token, appSessionOnly = settings.publicPlugin),token) })
             }
             post("/auth/social/poll") {
                 val request=call.receive<SocialPoll>();require(request.verifier.length in 43..128)
@@ -194,7 +203,8 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         post("/oauth/revoke") {
             val form = call.receiveParameters()
             require(form["client_id"] == settings.clientId && equalSecrets(form["client_secret"].orEmpty(),settings.clientSecret))
-            withContext(Dispatchers.IO) { store.revoke(form["token"].orEmpty()) }; call.respond(HttpStatusCode.OK)
+            withContext(Dispatchers.IO) { store.revokeOAuth(form["token"].orEmpty(), settings.clientId, settings.resource) }
+            call.respond(HttpStatusCode.OK)
         }
     }
     mcpStatelessStreamableHttp(path="/mcp",allowedHosts=listOf(URI(settings.publicUrl).host,"localhost","127.0.0.1"),allowedOrigins=listOf(settings.publicUrl,"https://chatgpt.com")) {
