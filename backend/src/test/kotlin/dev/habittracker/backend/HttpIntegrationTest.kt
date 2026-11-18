@@ -112,8 +112,8 @@ class HttpIntegrationTest {
             openAiDomainChallenge = "test-challenge"
         )
         application { backendModule(plugin, store) }
-        val credentials = Credentials("${UUID.randomUUID()}@plugin.test", "test-password-123")
-        val owner = store.register(credentials)
+        val socialAccount = store.socialIdentity("google", UUID.randomUUID().toString(), "${UUID.randomUUID()}@plugin.test", null)
+        val owner = store.newSession(socialAccount)
         val other = user()
         val identity = checkNotNull(store.authenticate(owner.token))
         val wrongAudience = store.issueOAuth(identity, plugin.clientId, "https://elsewhere.example.test/mcp")
@@ -129,11 +129,26 @@ class HttpIntegrationTest {
         val page = noRedirects.get("/oauth/authorize") { url { authorization.forEach { (key, value) -> parameters.append(key, value) } } }
         assertEquals(HttpStatusCode.OK, page.status)
         val nonce = checkNotNull(Regex("name=\"nonce\" value=\"([^\"]+)\"").find(page.bodyAsText())).groupValues[1]
-        val consent = noRedirects.post("/oauth/consent") {
+        val appCode = checkNotNull(Regex("id=\"app-code\">([^<]+)").find(page.bodyAsText())).groupValues[1]
+        suspend fun appConsent() = noRedirects.post("/oauth/app-consent") {
             contentType(ContentType.Application.FormUrlEncoded)
-            setBody(listOf("nonce" to nonce, "email" to credentials.email, "password" to credentials.password, "decision" to "allow").formUrlEncode())
+            setBody(listOf("nonce" to nonce).formUrlEncode())
         }
+        suspend fun appLink(action: String, token: String?) = noRedirects.post("/api/v1/account/chatgpt/$action") {
+            token?.let { bearerAuth(it) }
+            contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(ChatGptLinkRequest(appCode)))
+        }
+        assertEquals(HttpStatusCode.Conflict, appConsent().status)
+        assertEquals(HttpStatusCode.Unauthorized, appLink("approve", null).status)
+        val preview = appLink("preview", owner.token)
+        assertEquals(HttpStatusCode.OK, preview.status, preview.bodyAsText())
+        assertEquals(setOf("tracker:read", "tracker:write"), WireJson.decodeFromString<ChatGptLinkPreview>(preview.bodyAsText()).scopes)
+        assertEquals(HttpStatusCode.NoContent, appLink("approve", owner.token).status)
+        assertEquals(HttpStatusCode.NotFound, appLink("approve", other.token).status)
+        val consent = appConsent()
         assertEquals(HttpStatusCode.Found, consent.status)
+        assertEquals(HttpStatusCode.Gone, appConsent().status)
         val callback = Url(checkNotNull(consent.headers[HttpHeaders.Location]))
         assertEquals("chatgpt.com", callback.host)
         assertEquals(plugin.publicUrl, callback.parameters["iss"])

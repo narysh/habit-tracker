@@ -92,6 +92,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun cancelSocialLogin() { socialJob?.cancel();socialBusy.value=false }
+    suspend fun previewChatGptLink(code: String, account: Session): ChatGptLinkPreview = withContext(Dispatchers.IO) {
+        chatGptLinkApi(account).post("/api/v1/account/chatgpt/preview", ChatGptLinkRequest(code))
+    }
+    suspend fun approveChatGptLink(code: String, account: Session) = withContext(Dispatchers.IO) {
+        val body = WireJson.encodeToString(ChatGptLinkRequest(code)).encodeToByteArray()
+        chatGptLinkApi(account).request("/api/v1/account/chatgpt/approve", "POST", body)
+        Unit
+    }
+    private fun chatGptLinkApi(account: Session): Api {
+        val endpoint = app.preferences.url()
+        require(Uri.parse(endpoint).scheme == "https") { "Для подключения ChatGPT нужен HTTPS-сервер Habit Tracker" }
+        return Api(endpoint) {
+            val current = app.preferences.current()
+            check(current == account && app.preferences.url() == endpoint) { "Аккаунт или сервер изменился. Начни подключение заново." }
+            current.token
+        }
+    }
     private fun action(block: suspend ()->Unit) { viewModelScope.launch(Dispatchers.IO) { try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { message.value=e.message ?: "Не удалось выполнить действие" } } }
     fun changeServer(url: String,password: String,after: ()->Unit) {
         busy.value=true

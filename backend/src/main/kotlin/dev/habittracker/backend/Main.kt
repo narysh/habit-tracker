@@ -35,6 +35,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
     val oauth = AccountOAuth(settings,store)
     val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"))
     val throttle = LoginThrottle()
+    val linkThrottle = LoginThrottle()
     Files.createDirectories(settings.files)
     install(ContentNegotiation) { json(Json(WireJson) { explicitNulls=false; serializersModule=io.modelcontextprotocol.kotlin.sdk.types.McpJson.serializersModule }) }
     install(RequestBodyLimit) { bodyLimit { if(it.request.path().startsWith("/api/v1/attachments/")) 20L*1024*1024 else 8L*1024*1024 } }
@@ -119,6 +120,16 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             }
             post("/logout") { withContext(Dispatchers.IO) { store.revoke(call.attributes[tokenKey]) }; call.respond(HttpStatusCode.NoContent) }
             post("/account/revoke-sessions") { withContext(Dispatchers.IO) { store.revokeAll(call.attributes[identityKey].userId) }; call.respond(HttpStatusCode.NoContent) }
+            post("/account/chatgpt/preview") {
+                linkThrottle.check(call.attributes[identityKey].userId)
+                call.respond(oauth.previewAppLink(call.receive<ChatGptLinkRequest>().code))
+            }
+            post("/account/chatgpt/approve") {
+                val identity = call.attributes[identityKey]
+                linkThrottle.check(identity.userId)
+                oauth.approveAppLink(call.receive<ChatGptLinkRequest>().code, identity)
+                call.respond(HttpStatusCode.NoContent)
+            }
             get("/items") { call.respond(withContext(Dispatchers.IO) { store.list(call.attributes[identityKey].userId) }) }
             get("/items/{id}") {
                 val id = call.parameters["id"].orEmpty(); UUID.fromString(id)
@@ -182,12 +193,30 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             putJsonArray("scopes_supported") { add("tracker:read"); add("tracker:write") }
         }) }
         get("/oauth/authorize") {
-            val (nonce,request) = oauth.begin(call.request.queryParameters.entries().associate { it.key to it.value.single() })
+            val (nonce, request, appCode) = oauth.begin(call.request.queryParameters.entries().associate { it.key to it.value.single() })
+            val appLink = if (appCode == null) "" else """
+                <section><h2>Подтвердить в Android</h2>
+                <p>Открой Habit Tracker → Настройки → Подключить ChatGPT, введи код и проверь разрешения.</p>
+                <p><strong><code id="app-code">${escape(appCode)}</code></strong></p>
+                <p>Код действует 5 минут. Подтверждай только запрос, который начал сам.</p>
+                ${finishAppLinkForm(nonce)}
+                </section><h2>Войти по email и паролю</h2>
+            """.trimIndent()
             call.respondText("""<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Habit Tracker</title>
                 <style>body{font:18px system-ui;max-width:600px;margin:50px auto;padding:24px}input,button{font:inherit;padding:12px;margin:8px 0}input{width:90%}</style>
                 <h1>Подключить Habit Tracker</h1><p>Разрешения: ${escape(request.scopes.joinToString())}</p><p>Клиент: ${escape(settings.clientId)}</p><p>Возврат: ${escape(request.redirect)}</p>
+                $appLink
                 <form method="post" action="/oauth/consent"><input type="hidden" name="nonce" value="${escape(nonce)}"><label>Email<input name="email" type="email" autocomplete="username"></label>
                 <label>Пароль<input name="password" type="password" autocomplete="current-password" maxlength="128"></label><button name="decision" value="allow">Разрешить</button><button name="decision" value="deny">Отменить</button></form></html>""".trimIndent(),ContentType.Text.Html)
+        }
+        post("/oauth/app-consent") {
+            val nonce = call.receiveParameters()["nonce"].orEmpty()
+            val callback = oauth.finishAppLink(nonce)
+            if (callback != null) call.respondRedirect(callback)
+            else call.respondText(
+                """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Habit Tracker</title><p>Сначала подтверди доступ в Habit Tracker. Если ещё не скопировал код, вернись к предыдущей странице браузера.</p>${finishAppLinkForm(nonce)}</html>""",
+                ContentType.Text.Html, HttpStatusCode.Conflict
+            )
         }
         post("/oauth/consent") {
             throttle.check(call.request.local.remoteHost)
@@ -211,3 +240,10 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         mainMcp(store,call.attributes[identityKey],settings)
     }
 }
+
+private fun finishAppLinkForm(nonce: String): String = """
+    <form method="post" action="/oauth/app-consent">
+      <input type="hidden" name="nonce" value="${escape(nonce)}">
+      <button type="submit">Завершить подключение</button>
+    </form>
+""".trimIndent()

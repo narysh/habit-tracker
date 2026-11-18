@@ -99,6 +99,7 @@ private fun Content.description(): String = when(this) {
     var settings by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
     var socialSettings by remember { mutableStateOf(false) }
+    var chatGptLink by remember(session?.userId) { mutableStateOf(false) }
     var feature by remember { mutableStateOf<String?>(null) }
     var more by remember { mutableStateOf(false) }
     var selectedPlan by remember { mutableStateOf<Item?>(null) }
@@ -198,8 +199,9 @@ private fun Content.description(): String = when(this) {
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
+    if(chatGptLink) session?.let { account -> ChatGptLinkDialog(vm, account) { chatGptLink=false } }
     if(connection) ConnectionDialog(vm) { connection=false }
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
