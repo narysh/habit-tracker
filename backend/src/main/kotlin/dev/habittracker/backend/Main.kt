@@ -120,6 +120,16 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             }
             post("/logout") { withContext(Dispatchers.IO) { store.revoke(call.attributes[tokenKey]) }; call.respond(HttpStatusCode.NoContent) }
             post("/account/revoke-sessions") { withContext(Dispatchers.IO) { store.revokeAll(call.attributes[identityKey].userId) }; call.respond(HttpStatusCode.NoContent) }
+            get("/account/chatgpt") {
+                val connected = settings.publicPlugin && withContext(Dispatchers.IO) {
+                    store.hasOAuthConnection(call.attributes[identityKey].userId, settings.clientId, settings.resource)
+                }
+                call.respond(ChatGptConnection(settings.publicPlugin, connected))
+            }
+            delete("/account/chatgpt") {
+                withContext(Dispatchers.IO) { oauth.disconnect(call.attributes[identityKey].userId) }
+                call.respond(HttpStatusCode.NoContent)
+            }
             post("/account/chatgpt/preview") {
                 linkThrottle.check(call.attributes[identityKey].userId)
                 call.respond(oauth.previewAppLink(call.receive<ChatGptLinkRequest>().code))

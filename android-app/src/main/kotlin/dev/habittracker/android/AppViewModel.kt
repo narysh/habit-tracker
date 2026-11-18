@@ -92,6 +92,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun cancelSocialLogin() { socialJob?.cancel();socialBusy.value=false }
+    suspend fun chatGptConnection(account: Session): ChatGptConnection = withContext(Dispatchers.IO) {
+        chatGptLinkApi(account).get("/api/v1/account/chatgpt")
+    }
+    suspend fun disconnectChatGpt(account: Session) = withContext(Dispatchers.IO) {
+        chatGptLinkApi(account).request("/api/v1/account/chatgpt", "DELETE")
+        Unit
+    }
     suspend fun previewChatGptLink(code: String, account: Session): ChatGptLinkPreview = withContext(Dispatchers.IO) {
         chatGptLinkApi(account).post("/api/v1/account/chatgpt/preview", ChatGptLinkRequest(code))
     }

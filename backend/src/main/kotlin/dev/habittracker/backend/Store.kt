@@ -117,6 +117,24 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             statement.executeUpdate()
         }
     }
+    fun hasOAuthConnection(userId: String, clientId: String, resource: String): Boolean = pool.connection.use { c ->
+        c.prepareStatement("SELECT 1 FROM oauth_refresh_tokens WHERE user_id=?::uuid AND client_id=? AND resource=? AND expires_at>now() LIMIT 1").use { statement ->
+            statement.setString(1, userId)
+            statement.setString(2, clientId)
+            statement.setString(3, resource)
+            statement.executeQuery().use { it.next() }
+        }
+    }
+    fun revokeOAuthConnection(userId: String, clientId: String, resource: String) = tx { c ->
+        c.prepareStatement("""DELETE FROM sessions WHERE user_id=?::uuid AND token_hash IN (
+            SELECT access_hash FROM oauth_refresh_tokens WHERE user_id=?::uuid AND client_id=? AND resource=?)""").use { statement ->
+            statement.setString(1, userId)
+            statement.setString(2, userId)
+            statement.setString(3, clientId)
+            statement.setString(4, resource)
+            statement.executeUpdate()
+        }
+    }
     fun revoke(token: String) { tx { c ->
         val hash=digest(token)
         val access=c.prepareStatement("SELECT access_hash FROM oauth_refresh_tokens WHERE token_hash=?").use { it.setString(1,hash); it.executeQuery().use { r -> if(r.next()) r.getString(1) else null } }

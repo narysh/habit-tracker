@@ -191,5 +191,31 @@ class HttpIntegrationTest {
         }
         assertEquals("С телефона", sync(owner.token).changes.single().content.title)
         assertTrue(sync(other.token).changes.isEmpty())
+
+        suspend fun checkConnection(token: String): ChatGptConnection {
+            val response = noRedirects.get("/api/v1/account/chatgpt") { bearerAuth(token) }
+            assertEquals(HttpStatusCode.OK, response.status)
+            return WireJson.decodeFromString(response.bodyAsText())
+        }
+        suspend fun refresh(token: String) = noRedirects.post("/oauth/token") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("client_id" to plugin.clientId, "client_secret" to plugin.clientSecret,
+                "grant_type" to "refresh_token", "resource" to plugin.resource, "refresh_token" to token).formUrlEncode())
+        }
+        assertEquals(ChatGptConnection(true, true), checkConnection(owner.token))
+        val otherGrant = store.issueOAuth(checkNotNull(store.authenticate(other.token)), plugin.clientId, plugin.resource)
+        val rotation = refresh(allowed.refreshToken)
+        assertEquals(HttpStatusCode.OK, rotation.status, rotation.bodyAsText())
+        val rotated = WireJson.decodeFromString<OAuthTokens>(rotation.bodyAsText())
+        val denied = noRedirects.delete("/api/v1/account/chatgpt") { bearerAuth(rotated.accessToken) }
+        assertEquals(HttpStatusCode.Unauthorized, denied.status)
+        val disconnected = noRedirects.delete("/api/v1/account/chatgpt") { bearerAuth(owner.token) }
+        assertEquals(HttpStatusCode.NoContent, disconnected.status)
+        assertEquals(ChatGptConnection(true, false), checkConnection(owner.token))
+        assertEquals(HttpStatusCode.Unauthorized, rpc(rotated.accessToken, listRequest).status)
+        assertEquals(HttpStatusCode.Unauthorized, refresh(rotated.refreshToken).status)
+        assertEquals(HttpStatusCode.OK, rpc(otherGrant.accessToken, listRequest).status)
+        assertNotNull(store.authenticate(wrongClient.accessToken))
+        assertEquals("С телефона", sync(owner.token).changes.single().content.title)
     }
 }

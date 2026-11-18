@@ -15,6 +15,7 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
 @Serializable data class SocialResult(val status: String,val session: Session? = null,val message: String? = null)
 @Serializable data class ChatGptLinkRequest(val code: String)
 @Serializable data class ChatGptLinkPreview(val scopes: Set<String>, val expiresAt: String)
+@Serializable data class ChatGptConnection(val available: Boolean, val connected: Boolean)
 
 @Serializable data class Organization(val projectId: String?=null,val goalId: String?=null,val tags: Set<String> = emptySet(),val linkedIds: Set<String> = emptySet())
 @Serializable sealed interface Content { val title: String; val organization: Organization get()=Organization() }

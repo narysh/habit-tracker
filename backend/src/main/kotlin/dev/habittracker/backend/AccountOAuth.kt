@@ -54,6 +54,12 @@ class AccountOAuth(private val settings: Settings, private val store: Store) {
         pending.remove(key)
         return redirect(entry.request, identity)
     }
+    @Synchronized fun disconnect(userId: String) {
+        if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
+        store.revokeOAuthConnection(userId, settings.clientId, settings.resource)
+        pending.entries.removeIf { it.value.approved?.userId == userId }
+        codes.entries.removeIf { it.value.identity.userId == userId }
+    }
     private fun findAppLink(code: String): Pending {
         if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
         prune()
