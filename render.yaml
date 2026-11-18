@@ -1,0 +1,34 @@
+# Disposable staging deployment. Do not put real accounts or files here.
+services:
+  - type: web
+    name: habit-tracker-plugin-pilot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: habit-tracker-plugin-pilot-db
+          property: connectionString
+      - key: FILES_DIR
+        value: /data/files
+      - key: PUBLIC_CHATGPT_PLUGIN
+        value: "true"
+      - key: MCP_CLIENT_ID
+        value: habit-tracker-chatgpt
+      - key: MCP_CLIENT_SECRET
+        generateValue: true
+      - key: MCP_REDIRECT_URIS
+        value: https://chatgpt.com/connector_platform_oauth_redirect
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:MaxRAMPercentage=50 -XX:ActiveProcessorCount=2
+
+databases:
+  - name: habit-tracker-plugin-pilot-db
+    plan: free
+    region: frankfurt
+    ipAllowList: []
