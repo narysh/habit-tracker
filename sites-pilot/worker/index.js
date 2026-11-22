@@ -273,7 +273,12 @@ export default {
         }
         return complete(rpc.id, {
             content: [{ type: "text", text: outcomes[outcome] }],
-            isError: outcome !== "saved",
+            // Expected connection/business failures are actionable results, not
+            // invalid tool arguments. Some hosts otherwise replace the useful
+            // message with a generic INVALID_ARGUMENT error. The tool description
+            // still requires the assistant to verify the returned text before
+            // claiming a write succeeded.
+            isError: false,
         });
     },
 };

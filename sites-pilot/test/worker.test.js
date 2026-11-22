@@ -44,7 +44,8 @@ test("untrusted requests, missing owner binding and disallowed tools cannot reac
     const notConfigured = await (await request("tools/call", args, {
         env: { ...env, HABIT_TRACKER_SITE_OWNER_ID: undefined },
     })).json();
-    assert.equal(notConfigured.result.isError, true);
+    assert.equal(notConfigured.result.isError, false);
+    assert.match(notConfigured.result.content[0].text, /ещё не настроено/);
     const notAllowed = await (await request("tools/call", { ...args, name: "delete_item" })).json();
     assert.equal(notAllowed.error.code, -32602);
     assert.equal(send.mock.callCount(), 0);
@@ -106,6 +107,16 @@ test("null optional fields from MCP clients are treated as omitted", async t => 
         { operation_id: operationId, title: task.title, due_date: task.due_date });
 });
 
+test("an unconfigured pilot returns a clear result instead of an argument error", async t => {
+    const send = t.mock.method(globalThis, "fetch", () => { throw new Error("Unexpected network request"); });
+    const result = await (await request("tools/call", { name: "create_task", arguments: task }, {
+        env: { ...env, HABIT_TRACKER_MCP_ACCESS_TOKEN: undefined },
+    })).json();
+    assert.equal(result.result.isError, false);
+    assert.match(result.result.content[0].text, /ещё не настроено/);
+    assert.equal(send.mock.callCount(), 0);
+});
+
 test("the bridge accepts a matching SSE result without waiting for stream close", async t => {
     const encoder = new TextEncoder();
     let cancelled = false;
@@ -129,15 +140,15 @@ test("the bridge accepts a matching SSE result without waiting for stream close"
     assert.equal(cancelled, true);
 });
 
-test("expired or ambiguous upstream results surface errors and never retry automatically", async t => {
+test("expired or ambiguous upstream results remain explicit and never retry automatically", async t => {
     const send = t.mock.method(globalThis, "fetch", () => new Response("upstream detail", { status: 401 }));
     const expired = await (await request("tools/call", { name: "create_task", arguments: task })).json();
-    assert.equal(expired.result.isError, true);
+    assert.equal(expired.result.isError, false);
     assert.match(expired.result.content[0].text, /OAuth/);
     assert.doesNotMatch(JSON.stringify(expired), /upstream detail/);
     send.mock.mockImplementation(() => new Response("unavailable", { status: 502 }));
     const uncertain = await (await request("tools/call", { name: "create_task", arguments: task })).json();
-    assert.equal(uncertain.result.isError, true);
+    assert.equal(uncertain.result.isError, false);
     assert.match(uncertain.result.content[0].text, /тот же operation_id/);
     assert.equal(send.mock.callCount(), 2);
 });
