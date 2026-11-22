@@ -91,6 +91,21 @@ test("creation forwards only approved text fields and preserves the idempotency 
     ]);
 });
 
+test("null optional fields from MCP clients are treated as omitted", async t => {
+    const send = t.mock.method(globalThis, "fetch", (_url, init) => {
+        const { id } = JSON.parse(init.body);
+        return Response.json({
+            jsonrpc: "2.0", id,
+            result: { content: [{ type: "text", text: JSON.stringify({ status: "APPLIED" }) }] },
+        });
+    });
+    const args = { operation_id: operationId, title: task.title, due_date: task.due_date, description: null, due_time: null, zone_id: null };
+    const result = await (await request("tools/call", { name: "create_task", arguments: args })).json();
+    assert.equal(result.result.isError, false);
+    assert.deepEqual(JSON.parse(send.mock.calls[0].arguments[1].body).params.arguments,
+        { operation_id: operationId, title: task.title, due_date: task.due_date });
+});
+
 test("the bridge accepts a matching SSE result without waiting for stream close", async t => {
     const encoder = new TextEncoder();
     let cancelled = false;

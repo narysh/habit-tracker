@@ -79,6 +79,15 @@ function isObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeArguments(tool, args) {
+    if (!isObject(args)) return null;
+    const { properties, required } = tool.inputSchema;
+    // Some MCP clients serialize omitted optional arguments as JSON null. Treat
+    // those exactly like omitted fields; required nulls still fail validation.
+    return Object.fromEntries(Object.entries(args).filter(([key, value]) =>
+        value !== null || required.includes(key) || !Object.hasOwn(properties, key)));
+}
+
 async function* decodeBody(body, limit) {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const reader = body?.getReader();
@@ -243,8 +252,8 @@ export default {
         if (rpc.method === "tools/list") return complete(rpc.id, { tools });
         if (rpc.method !== "tools/call") return error(rpc.id, -32601, "Method not found");
         const tool = tools.find(candidate => candidate.name === rpc.params?.name);
-        const args = rpc.params?.arguments;
         if (!tool) return error(rpc.id, -32602, "Unknown tool");
+        const args = normalizeArguments(tool, rpc.params?.arguments);
         if (!validArguments(tool, args)) {
             return complete(rpc.id, {
                 content: [{ type: "text", text: "Проверь обязательные поля и формат аргументов." }],
