@@ -4,6 +4,7 @@
 import argparse
 import base64
 import hashlib
+from datetime import date
 from html.parser import HTMLParser
 import json
 import os
@@ -142,38 +143,72 @@ def smoke(server, client_id, secret, callback, challenge):
                                                             "clientInfo": {"name": "habit-tracker-smoke", "version": "1"}})
         require("tools" in initialization.get("capabilities", {}), "MCP initialization did not advertise tools")
         catalog = server.rpc(access, "tools/list")
-        require({tool["name"] for tool in catalog["tools"]} == {"create_task", "get_tasks", "complete_task", "create_note"}, "Unexpected tool catalog")
+        expected_tools = {
+            "get_tasks", "get_notes", "get_habits", "get_habit_history", "get_projects", "search_records", "get_week_review",
+            "create_task", "create_habit", "create_note", "create_project", "propose_week_plan",
+            "update_item", "complete_task", "mark_habit", "delete_item", "get_attachment",
+        }
+        require({tool["name"] for tool in catalog["tools"]} == expected_tools, "Unexpected tool catalog")
         task = {"operation_id": str(uuid.uuid4()), "title": "HTTPS plugin smoke test"}
         note = {"operation_id": str(uuid.uuid4()), "title": "HTTPS note smoke test", "text": "First line\nSecond line"}
+        habit = {"operation_id": str(uuid.uuid4()), "title": "HTTPS walking smoke test", "mode": "WEEKLY_TARGET",
+                 "target_per_week": 3, "starts_on": date.today().isoformat(), "zone_id": "UTC"}
         for _ in range(2):
             for tool_name, arguments in (("create_task", task), ("create_note", note)):
                 result = server.rpc(access, "tools/call", {"name": tool_name, "arguments": arguments})
                 require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", f"{tool_name} did not apply")
+        result = server.rpc(access, "tools/call", {"name": "create_habit", "arguments": habit})
+        require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "create_habit did not apply")
         sync = {"operations": [], "cursor": 0}
         owner_items = server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]
-        require(len(owner_items) == 2, "Task or note missing or duplicated in Android sync")
+        require(len(owner_items) == 3, "Task, note or habit missing or duplicated in Android sync")
         items_by_kind = {item["content"]["kind"]: item for item in owner_items}
-        require(set(items_by_kind) == {"task", "note"}, "Android sync did not return one task and one note")
+        require(set(items_by_kind) == {"task", "note", "habit"}, "Android sync did not return one task, note and habit")
         task_item = items_by_kind["task"]
-        note_content = items_by_kind["note"]["content"]
+        note_item = items_by_kind["note"]
+        note_content = note_item["content"]
+        habit_item = items_by_kind["habit"]
         require(task_item["content"]["title"] == task["title"], "Task title changed during sync")
         require(note_content["title"] == note["title"] and note_content["text"] == note["text"], "Note title or text changed during sync")
+        require(habit_item["content"]["title"] == habit["title"], "Habit title changed during sync")
         require(not server.data("/api/v1/sync", token=other, json_body=sync)["changes"], "Task or note leaked to a different account")
         listing = server.rpc(access, "tools/call", {"name": "get_tasks", "arguments": {}})
         require([item["id"] for item in json.loads(listing["content"][0]["text"])] == [task_item["id"]], "MCP listing omitted the task or exposed the note")
+        for name in ("get_notes", "get_habits"):
+            result = server.rpc(access, "tools/call", {"name": name, "arguments": {}})
+            require(len(json.loads(result["content"][0]["text"])) == 1, f"{name} returned an unexpected list")
+        mark = {"operation_id": str(uuid.uuid4()), "habit_id": habit_item["id"], "date": date.today().isoformat(),
+                "expected_version": 0, "completed": True}
+        result = server.rpc(access, "tools/call", {"name": "mark_habit", "arguments": mark})
+        require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "Habit mark did not apply")
+        history = server.rpc(access, "tools/call", {"name": "get_habit_history", "arguments": {}})
+        require(len(json.loads(history["content"][0]["text"])) == 1, "Habit history omitted the new mark")
+        updated_content = dict(note_content)
+        updated_content["title"] = "HTTPS note smoke test updated"
+        update = {"operation_id": str(uuid.uuid4()), "id": note_item["id"], "expected_version": note_item["version"], "content": updated_content}
+        result = server.rpc(access, "tools/call", {"name": "update_item", "arguments": update})
+        updated_note = json.loads(result["content"][0]["text"])
+        require(updated_note["status"] == "APPLIED" and updated_note["item"]["content"]["title"] == updated_content["title"], "Note update did not apply")
         completion = {"operation_id": str(uuid.uuid4()), "id": task_item["id"],
                       "expected_version": task_item["version"], "completed": True}
         result = server.rpc(access, "tools/call", {"name": "complete_task", "arguments": completion})
-        require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "Task completion did not apply")
+        completed = json.loads(result["content"][0]["text"])
+        require(completed["status"] == "APPLIED" and completed["item"]["content"]["completed"], "Task completion did not apply")
+        deletion = {"operation_id": str(uuid.uuid4()), "id": task_item["id"],
+                    "expected_version": completed["item"]["version"]}
+        result = server.rpc(access, "tools/call", {"name": "delete_item", "arguments": deletion})
+        require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "Task deletion did not apply")
         updated = server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]
-        require(any(item["id"] == task_item["id"] and item["content"]["completed"] for item in updated), "Task completion missing from Android sync")
-        print("PASS task creation, listing, completion, note creation, idempotency and isolated Android sync", flush=True)
+        require(any(item["id"] == task_item["id"] and item["deleted"] for item in updated), "Task deletion missing from Android sync")
+        require(any(item["id"] == note_item["id"] and item["content"]["title"] == updated_content["title"] for item in updated), "Note update missing from Android sync")
+        require(any(item["content"]["kind"] == "habit_mark" for item in updated), "Habit mark missing from Android sync")
+        print("PASS MCP CRUD, habit tracking, note/task reads, idempotency, Android sync and account isolation", flush=True)
 
         server.request("/api/v1/account/chatgpt", method="DELETE", token=owner, expect=204)
         server.request("/mcp", token=access, json_body=basic_rpc, expect=401)
         server.request("/oauth/token", form={**token_params, "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}, expect=401)
         require(not server.data("/api/v1/account/chatgpt", token=owner)["connected"], "Account still shows connected")
-        require(len(server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]) == 2, "Android session no longer works")
+        require(len(server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]) == 4, "Android session no longer works")
         print("PASS revocation of MCP access while Android keeps working", flush=True)
     finally:
         for token in sessions:

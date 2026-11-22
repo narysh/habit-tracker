@@ -226,7 +226,7 @@ class HttpIntegrationTest {
         assertTrue(WireJson.parseToJsonElement(rpc.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
         assertTrue(store.list(account.userId).isEmpty())
     }
-    @Test fun `public plugin accepts only its own OAuth grant and syncs tasks and notes to the same Android account`() = testApplication {
+    @Test fun `public MCP exposes scoped tools for CRUD habits attachments and same Android account`() = testApplication {
         val plugin = settings.copy(
             publicUrl = "https://tracker.example.test",
             clientId = "habit-tracker-chatgpt",
@@ -291,6 +291,20 @@ class HttpIntegrationTest {
             header(HttpHeaders.Accept, "application/json, text/event-stream")
             setBody(body)
         }
+        suspend fun callTool(token: String, requestId: Int, name: String, arguments: JsonObject): JsonObject {
+            val body = buildJsonObject {
+                put("jsonrpc", "2.0")
+                put("id", requestId)
+                put("method", "tools/call")
+                putJsonObject("params") {
+                    put("name", name)
+                    put("arguments", arguments)
+                }
+            }.toString()
+            val response = rpc(token, body)
+            assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
+            return WireJson.parseToJsonElement(response.bodyAsText()).jsonObject.getValue("result").jsonObject
+        }
         val listRequest = """{"jsonrpc":"2.0","id":1,"method":"tools/list"}"""
         for (token in listOf(owner.token, wrongAudience.accessToken, wrongClient.accessToken)) {
             assertEquals(HttpStatusCode.Unauthorized, rpc(token, listRequest).status)
@@ -299,7 +313,19 @@ class HttpIntegrationTest {
         val catalog = rpc(allowed.accessToken, listRequest)
         assertEquals(HttpStatusCode.OK, catalog.status, catalog.bodyAsText())
         val tools = WireJson.parseToJsonElement(catalog.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("tools").jsonArray
-        assertEquals(setOf("create_task", "get_tasks", "complete_task", "create_note"), tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
+        val publicTools = setOf(
+            "get_tasks", "get_notes", "get_habits", "get_habit_history", "get_projects", "search_records", "get_week_review",
+            "create_task", "create_habit", "create_note", "create_project", "propose_week_plan",
+            "update_item", "complete_task", "mark_habit", "delete_item", "get_attachment",
+        )
+        assertEquals(publicTools, tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
+
+        val readOnly = store.issueOAuth(identity.copy(scopes = setOf("tracker:read")), plugin.clientId, plugin.resource)
+        val readCatalog = rpc(readOnly.accessToken, listRequest)
+        assertEquals(HttpStatusCode.OK, readCatalog.status, readCatalog.bodyAsText())
+        val readTools = WireJson.parseToJsonElement(readCatalog.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("tools").jsonArray
+        assertEquals(setOf("get_tasks", "get_notes", "get_habits", "get_habit_history", "get_projects", "search_records", "get_week_review", "get_attachment"),
+            readTools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
         assertEquals(HttpStatusCode.Unauthorized, client.get("/api/v1/items") { bearerAuth(allowed.accessToken) }.status)
         val create = rpc(allowed.accessToken, """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_task","arguments":{"operation_id":"${UUID.randomUUID()}","title":"С телефона"}}}""")
         assertEquals(HttpStatusCode.OK, create.status, create.bodyAsText())
@@ -318,15 +344,84 @@ class HttpIntegrationTest {
                 put("arguments", noteArguments)
             }
         }.toString()
-        val readOnly = store.issueOAuth(identity.copy(scopes = setOf("tracker:read")), plugin.clientId, plugin.resource)
         val rejectedNote = rpc(readOnly.accessToken, noteRequest)
         assertEquals(HttpStatusCode.OK, rejectedNote.status, rejectedNote.bodyAsText())
-        assertTrue(WireJson.parseToJsonElement(rejectedNote.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
+        val rejectedBody = WireJson.parseToJsonElement(rejectedNote.bodyAsText()).jsonObject
+        assertTrue(rejectedBody.containsKey("error") || rejectedBody["result"]?.jsonObject?.get("isError")?.jsonPrimitive?.boolean == true)
         repeat(2) {
             val note = rpc(allowed.accessToken, noteRequest)
             assertEquals(HttpStatusCode.OK, note.status, note.bodyAsText())
             assertFalse(WireJson.parseToJsonElement(note.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
         }
+        val noteBeforeUpdate = store.list(owner.userId).single { (it.content as? NoteContent)?.title == "Заметка с телефона" }
+        val updatedNoteContent = (noteBeforeUpdate.content as NoteContent).copy(title = "Заметка с телефона — обновлена")
+        val update = callTool(allowed.accessToken, 12, "update_item", buildJsonObject {
+            put("id", noteBeforeUpdate.id)
+            put("expected_version", noteBeforeUpdate.version)
+            put("operation_id", UUID.randomUUID().toString())
+            put("content", WireJson.encodeToJsonElement<Content>(updatedNoteContent))
+        })
+        assertFalse(update.getValue("isError").jsonPrimitive.boolean)
+        assertTrue(callTool(readOnly.accessToken, 13, "get_notes", buildJsonObject {}).getValue("isError").jsonPrimitive.boolean.not())
+        assertEquals("Заметка с телефона — обновлена", (checkNotNull(store.get(owner.userId, noteBeforeUpdate.id)).content as NoteContent).title)
+        val habitCreate = callTool(allowed.accessToken, 4, "create_habit", buildJsonObject {
+            put("operation_id", UUID.randomUUID().toString())
+            put("title", "Бег")
+            put("mode", "WEEKLY_TARGET")
+            put("target_per_week", 2)
+            put("starts_on", "2026-11-01")
+            put("zone_id", "Europe/Moscow")
+        })
+        assertFalse(habitCreate.getValue("isError").jsonPrimitive.boolean)
+        val habit = store.list(owner.userId).single { it.content is HabitContent }
+        val mark = callTool(allowed.accessToken, 5, "mark_habit", buildJsonObject {
+            put("habit_id", habit.id)
+            put("date", "2026-11-20")
+            put("expected_version", 0)
+            put("operation_id", UUID.randomUUID().toString())
+            put("completed", true)
+        })
+        assertFalse(mark.getValue("isError").jsonPrimitive.boolean)
+        assertFalse(callTool(readOnly.accessToken, 6, "get_habits", buildJsonObject {}).getValue("isError").jsonPrimitive.boolean)
+        assertFalse(callTool(readOnly.accessToken, 7, "get_habit_history", buildJsonObject {}).getValue("isError").jsonPrimitive.boolean)
+
+        val task = store.list(owner.userId).single { it.content is TaskContent }
+        val complete = callTool(allowed.accessToken, 8, "complete_task", buildJsonObject {
+            put("id", task.id)
+            put("expected_version", task.version)
+            put("operation_id", UUID.randomUUID().toString())
+            put("completed", true)
+        })
+        assertFalse(complete.getValue("isError").jsonPrimitive.boolean)
+        val completedTask = checkNotNull(store.get(owner.userId, task.id))
+        assertTrue((completedTask.content as TaskContent).completed)
+        val deleted = callTool(allowed.accessToken, 9, "delete_item", buildJsonObject {
+            put("id", task.id)
+            put("expected_version", completedTask.version)
+            put("operation_id", UUID.randomUUID().toString())
+        })
+        assertFalse(deleted.getValue("isError").jsonPrimitive.boolean)
+        assertTrue(checkNotNull(store.get(owner.userId, task.id)).deleted)
+
+        val fileId = UUID.randomUUID().toString()
+        val fileNoteId = UUID.randomUUID().toString()
+        store.mutate(owner.userId, Mutation(UUID.randomUUID().toString(), fileNoteId, 0, NoteContent("Вложение", attachmentIds = listOf(fileId))))
+        val upload = client.put("/api/v1/attachments/$fileId") {
+            bearerAuth(owner.token)
+            url { parameters.append("noteId", fileNoteId); parameters.append("name", "selected.txt"); parameters.append("mediaType", "text/plain") }
+            contentType(ContentType.Text.Plain)
+            setBody("only this selected file".toByteArray())
+        }
+        assertEquals(HttpStatusCode.OK, upload.status, upload.bodyAsText())
+        val selectedFile = callTool(readOnly.accessToken, 10, "get_attachment", buildJsonObject { put("id", fileId) })
+        assertFalse(selectedFile.getValue("isError").jsonPrimitive.boolean)
+        val fileBlock = selectedFile.getValue("content").jsonArray.last().jsonObject.getValue("resource").jsonObject
+        val encodedFile = fileBlock.getValue("blob").jsonPrimitive.content
+        assertEquals("only this selected file", java.util.Base64.getDecoder().decode(encodedFile).toString(Charsets.UTF_8))
+        val otherGrant = store.issueOAuth(checkNotNull(store.authenticate(other.token)), plugin.clientId, plugin.resource)
+        val otherFile = callTool(otherGrant.accessToken, 11, "get_attachment", buildJsonObject { put("id", fileId) })
+        assertTrue(otherFile.getValue("isError").jsonPrimitive.boolean)
+
         suspend fun sync(token: String) = client.post("/api/v1/sync") {
             bearerAuth(token)
             contentType(ContentType.Application.Json)
@@ -336,9 +431,11 @@ class HttpIntegrationTest {
             WireJson.decodeFromString<SyncResponse>(response.bodyAsText())
         }
         val synced = sync(owner.token).changes
-        assertEquals(2, synced.size)
-        assertEquals("С телефона", synced.map { it.content }.filterIsInstance<TaskContent>().single().title)
-        assertEquals(NoteContent("Заметка с телефона", "Строка 1\nСтрока 2"), synced.map { it.content }.filterIsInstance<NoteContent>().single())
+        assertTrue(synced.any { it.deleted && (it.content as? TaskContent)?.title == "С телефона" })
+        assertTrue(synced.any { (it.content as? NoteContent)?.title == "Заметка с телефона — обновлена" && (it.content as NoteContent).text == "Строка 1\nСтрока 2" })
+        assertTrue(synced.any { (it.content as? HabitContent)?.title == "Бег" })
+        assertTrue(synced.any { it.content is HabitMarkContent })
+        assertTrue(synced.any { (it.content as? NoteContent)?.title == "Вложение" })
         assertTrue(sync(other.token).changes.isEmpty())
 
         suspend fun checkConnection(token: String): ChatGptConnection {
@@ -352,7 +449,6 @@ class HttpIntegrationTest {
                 "grant_type" to "refresh_token", "resource" to plugin.resource, "refresh_token" to token).formUrlEncode())
         }
         assertEquals(ChatGptConnection(true, true), checkConnection(owner.token))
-        val otherGrant = store.issueOAuth(checkNotNull(store.authenticate(other.token)), plugin.clientId, plugin.resource)
         val rotation = refresh(allowed.refreshToken)
         assertEquals(HttpStatusCode.OK, rotation.status, rotation.bodyAsText())
         val rotated = WireJson.decodeFromString<OAuthTokens>(rotation.bodyAsText())
