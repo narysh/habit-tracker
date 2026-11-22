@@ -27,7 +27,7 @@ Android открывает системный браузер на страниц
 ## Настройка владельцем
 
 1. Google: создай OAuth-клиент типа **Web application** в Google Cloud Console, настрой consent screen и тестовых пользователей, добавь Google Redirect URI. Scopes: `openid email`. Если кабинет требует подтверждения домена или дополнительные проверки, выполни их до включения способа для всех пользователей. [Официальная инструкция Google](https://developers.google.com/identity/protocols/oauth2/web-server).
-2. VK: создай приложение в кабинете VK ID, разреши веб-авторизацию с указанным Redirect URI. Нужен App ID; scopes: `vkid.personal_info email`. [Официальный VK ID SDK и описание Code/PKCE](https://github.com/VKCOM/vkid-web-sdk/blob/master/src/auth/auth.ts).
+2. VK: создай приложение в кабинете VK ID, разреши веб-авторизацию с указанным Redirect URI. Нужен App ID; scopes: `vkid.personal_info email`. Вход использует актуальный домен `id.vk.ru`, PKCE и `device_id`; при обмене кода `code` передаётся в теле POST, остальные параметры — в URL. Секрет клиента VK backend не хранит. [Официальный VK ID SDK и описание Code/PKCE](https://github.com/VKCOM/vkid-web-sdk/blob/master/src/auth/auth.ts), [текущие домены VK ID](https://github.com/VKCOM/vkid-web-sdk/blob/master/src/constants.ts).
 3. Яндекс: создай OAuth-приложение с веб-платформой и указанным Redirect URI, разреши `login:email login:info`. Получи Client ID и Client secret. [Регистрация у Яндекса](https://yandex.ru/dev/id/doc/en/register-client), [Code + PKCE](https://yandex.ru/dev/id/doc/ru/codes/code-url).
 
 Создай **локально** `.local/social.env`:

@@ -1,9 +1,13 @@
 package dev.habittracker.backend
 
 import dev.habittracker.shared.*
+import com.sun.net.httpserver.HttpServer
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Test
+import java.net.InetSocketAddress
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.UUID
 import kotlin.test.*
@@ -24,6 +28,7 @@ class SocialLoginTest {
             }
             val attempt=social.start(SocialStart(provider,challenge(verifier)),null)
             assertTrue(attempt.authorizationUrl.contains("code_challenge="));assertTrue(attempt.authorizationUrl.contains("state=${attempt.id}"))
+            if(provider=="vk") assertEquals("id.vk.ru",java.net.URI(attempt.authorizationUrl).host)
             assertFailsWith<ApiFailure>{social.poll(SocialPoll(attempt.id,secret()))}
             assertEquals("WAITING",social.poll(SocialPoll(attempt.id,verifier)).status)
             social.callback(provider,attempt.id,"provider-code",null,"device")
@@ -32,6 +37,42 @@ class SocialLoginTest {
             assertEquals("DONE",result.status);assertNotNull(store.authenticate(result.session!!.token))
             assertFailsWith<ApiFailure>{social.poll(SocialPoll(attempt.id,verifier))}
         }
+    }
+    @Test fun `VK ID gateway uses current endpoints and sends PKCE parameters in the expected locations`() {
+        val requests=mutableListOf<Pair<String,Map<String,String>>>()
+        val server=HttpServer.create(InetSocketAddress("127.0.0.1",0),0)
+        server.createContext("/oauth2/auth") { exchange ->
+            val query=decodeForm(exchange.requestURI.rawQuery.orEmpty())
+            val body=decodeForm(exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8))
+            synchronized(requests) { requests += "/oauth2/auth" to (query+body.mapKeys { "body:${it.key}" }) }
+            val result="""{"access_token":"vk-access","state":"expected-state"}""".toByteArray()
+            exchange.responseHeaders.add("Content-Type","application/json")
+            exchange.sendResponseHeaders(200,result.size.toLong());exchange.responseBody.use { it.write(result) }
+        }
+        server.createContext("/oauth2/user_info") { exchange ->
+            val query=decodeForm(exchange.requestURI.rawQuery.orEmpty())
+            val body=decodeForm(exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8))
+            synchronized(requests) { requests += "/oauth2/user_info" to (query+body.mapKeys { "body:${it.key}" }) }
+            val result="""{"user":{"user_id":741,"email":"vk-user@example.test"}}""".toByteArray()
+            exchange.responseHeaders.add("Content-Type","application/json")
+            exchange.sendResponseHeaders(200,result.size.toLong());exchange.responseBody.use { it.write(result) }
+        }
+        server.start()
+        try {
+            val gateway=ProviderGateway("http://127.0.0.1:${server.address.port}")
+            val person=gateway.exchange(config("vk"),"provider-code","pkce-verifier","expected-state","device-id")
+            assertEquals(ProviderPerson("741","vk-user@example.test"),person)
+            assertEquals(mapOf(
+                "grant_type" to "authorization_code",
+                "client_id" to "test-client",
+                "redirect_uri" to "https://app.test/auth/social/vk/callback",
+                "code_verifier" to "pkce-verifier",
+                "device_id" to "device-id",
+                "state" to "expected-state",
+                "body:code" to "provider-code",
+            ),requests[0].second)
+            assertEquals(mapOf("client_id" to "test-client","body:access_token" to "vk-access"),requests[1].second)
+        } finally { server.stop(0) }
     }
     @Test fun `explicit linking shares the existing account and cannot steal a linked identity`() {
         val alice=store.register(Credentials("${UUID.randomUUID()}@social.test","test-password-123"))
@@ -85,5 +126,9 @@ class SocialLoginTest {
         social.callback("google",next.id,"code",null,null)
         assertEquals("LINKED",social.poll(SocialPoll(next.id,verifier)).status)
         assertEquals(setOf("google"),store.linkedProviders(account.userId))
+    }
+    private fun decodeForm(value: String)=value.split('&').filter(String::isNotEmpty).associate { pair ->
+        val parts=pair.split('=',limit=2)
+        URLDecoder.decode(parts[0],StandardCharsets.UTF_8) to URLDecoder.decode(parts.getOrElse(1){""},StandardCharsets.UTF_8)
     }
 }

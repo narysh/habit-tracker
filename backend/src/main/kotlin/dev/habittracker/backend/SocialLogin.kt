@@ -9,15 +9,18 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
+internal const val VK_ID_ORIGIN = "https://id.vk.ru"
+
 data class ProviderConfig(val id: String,val title: String,val clientId: String,val clientSecret: String,val callback: String)
 data class ProviderPerson(val subject: String,val email: String?)
 fun form(values: Map<String,String>) = values.entries.joinToString("&") { URLEncoder.encode(it.key,"UTF-8")+"="+URLEncoder.encode(it.value,"UTF-8") }
 
 /** Exchanges provider-issued authorization codes only. Identity fields supplied by Android are never trusted. */
-class ProviderGateway {
+class ProviderGateway(private val vkIdOrigin: String = VK_ID_ORIGIN) {
     private val http=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build()
-    private fun request(url: String,body: Map<String,String>?=null,bearer: String?=null,scheme: String="Bearer"): JsonObject {
-        val builder=HttpRequest.newBuilder(URI(url)).timeout(Duration.ofSeconds(20)).header("Accept","application/json")
+    private fun request(url: String,body: Map<String,String>?=null,bearer: String?=null,scheme: String="Bearer",query: Map<String,String> = emptyMap()): JsonObject {
+        val target=if(query.isEmpty()) url else "$url?${form(query)}"
+        val builder=HttpRequest.newBuilder(URI(target)).timeout(Duration.ofSeconds(20)).header("Accept","application/json")
         if(body!=null) builder.header("Content-Type","application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString(form(body)))
         if(bearer!=null) builder.header("Authorization","$scheme $bearer")
         val response=http.send(builder.build(),HttpResponse.BodyHandlers.ofString())
@@ -27,16 +30,21 @@ class ProviderGateway {
         return json
     }
     fun exchange(config: ProviderConfig,code: String,verifier: String,state: String,device: String?): ProviderPerson {
-        val tokenUrl=when(config.id) { "google"->"https://oauth2.googleapis.com/token"; "vk"->"https://id.vk.com/oauth2/auth"; else->"https://oauth.yandex.ru/token" }
-        val params=mutableMapOf("grant_type" to "authorization_code","code" to code,"client_id" to config.clientId,"redirect_uri" to config.callback,"code_verifier" to verifier)
-        if(config.id=="vk") { require(!device.isNullOrBlank());params["device_id"]=device;params["state"]=state }
-        else params["client_secret"]=config.clientSecret
-        val token=request(tokenUrl,params)
+        val tokenUrl=when(config.id) { "google"->"https://oauth2.googleapis.com/token"; "vk"->"$vkIdOrigin/oauth2/auth"; else->"https://oauth.yandex.ru/token" }
+        val params=mutableMapOf("grant_type" to "authorization_code","client_id" to config.clientId,"redirect_uri" to config.callback,"code_verifier" to verifier)
+        val token=if(config.id=="vk") {
+            require(!device.isNullOrBlank())
+            params["device_id"]=device;params["state"]=state
+            request(tokenUrl,mapOf("code" to code),query=params)
+        } else {
+            params["code"]=code;params["client_secret"]=config.clientSecret
+            request(tokenUrl,params)
+        }
         if(config.id=="vk" && token["state"]?.jsonPrimitive?.content!=state) throw ApiFailure(401,"Некорректный state провайдера")
         val access=token["access_token"]?.jsonPrimitive?.content ?: throw ApiFailure(401,"Провайдер не выдал токен")
         val user=when(config.id) {
             "google"->request("https://openidconnect.googleapis.com/v1/userinfo",bearer=access)
-            "vk"->request("https://id.vk.com/oauth2/user_info",mapOf("client_id" to config.clientId,"access_token" to access))["user"]?.jsonObject ?: throw ApiFailure(401,"Нет профиля VK")
+            "vk"->request("$vkIdOrigin/oauth2/user_info",mapOf("access_token" to access),query=mapOf("client_id" to config.clientId))["user"]?.jsonObject ?: throw ApiFailure(401,"Нет профиля VK")
             else->request("https://login.yandex.ru/info?format=json",bearer=access,scheme="OAuth")
         }
         val subject=user[when(config.id){"google"->"sub";"vk"->"user_id";else->"id"}]?.jsonPrimitive?.content ?: throw ApiFailure(401,"Нет идентификатора пользователя")
@@ -68,7 +76,7 @@ class SocialLogin(private val store: Store,val configs: Map<String,ProviderConfi
         if(pending.size>=1000) throw ApiFailure(429,"Слишком много попыток входа")
         val id=secret();val attempt=Pending(config,request.challenge,if(request.link) identity!!.userId else null,if(request.link) token else null)
         pending[id]=attempt
-        val authorize=when(config.id){"google"->"https://accounts.google.com/o/oauth2/v2/auth";"vk"->"https://id.vk.com/authorize";else->"https://oauth.yandex.ru/authorize"}
+        val authorize=when(config.id){"google"->"https://accounts.google.com/o/oauth2/v2/auth";"vk"->"$VK_ID_ORIGIN/authorize";else->"https://oauth.yandex.ru/authorize"}
         val scope=when(config.id){"google"->"openid email";"vk"->"vkid.personal_info email";else->"login:email login:info"}
         val query=mapOf("response_type" to "code","client_id" to config.clientId,"redirect_uri" to config.callback,"scope" to scope,"state" to id,"code_challenge" to challenge(attempt.verifier),"code_challenge_method" to if(config.id=="vk") "s256" else "S256")
         return SocialAttempt(id,"$authorize?${form(query)}")
