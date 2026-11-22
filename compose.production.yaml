@@ -1,0 +1,53 @@
+name: habit-tracker-production
+
+services:
+  postgres:
+    image: postgres:17.12
+    ports: !reset []
+    networks: [database]
+    restart: unless-stopped
+    logging:
+      driver: local
+
+  backend:
+    ports: !reset []
+    networks: [edge, database]
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the stable HTTPS origin}
+      ANDROID_PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the stable HTTPS origin}
+      TRUST_REVERSE_PROXY: "true"
+    restart: unless-stopped
+    logging:
+      driver: local
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the stable HTTPS origin}
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [edge]
+    volumes:
+      - type: bind
+        source: ./infra/caddy/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+    logging:
+      driver: local
+
+networks:
+  edge:
+  database:
+    internal: true
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -33,14 +33,17 @@ class AccountOAuth(private val settings: Settings, private val store: Store) {
         val key = digest(nonce)
         val entry = pending[key] ?: throw IllegalArgumentException("Запрос подключения истёк")
         require(!allow || entry.approved == null) { "Подключение уже подтверждено в приложении. Нажми «Завершить подключение»." }
+        if (allow && !store.accountExists(requireNotNull(identity).userId)) throw ApiFailure(401, "Войди в аккаунт")
         pending.remove(key)
-        return redirect(entry.request, if (allow) requireNotNull(identity) else null)
+        return redirect(entry.request, if (allow) identity else null)
     }
     @Synchronized fun previewAppLink(code: String): ChatGptLinkPreview {
         val entry = findAppLink(code)
         return ChatGptLinkPreview(entry.request.scopes, entry.request.expires.toString())
     }
-    @Synchronized fun approveAppLink(code: String, identity: Identity) {
+    @Synchronized fun approveAppLink(code: String, appToken: String) {
+        val identity = store.authenticate(appToken, appSessionOnly = true)
+            ?: throw ApiFailure(401, "Войди в Habit Tracker")
         val entry = findAppLink(code)
         require(identity.scopes.containsAll(entry.request.scopes)) { "Недостаточно прав для подключения" }
         entry.approved = identity
@@ -57,6 +60,13 @@ class AccountOAuth(private val settings: Settings, private val store: Store) {
     @Synchronized fun disconnect(userId: String) {
         if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
         store.revokeOAuthConnection(userId, settings.clientId, settings.resource)
+        removeGrants(userId)
+    }
+    @Synchronized fun deleteAccount(userId: String, appToken: String) {
+        store.deleteAccount(userId, appToken)
+        removeGrants(userId)
+    }
+    private fun removeGrants(userId: String) {
         pending.entries.removeIf { it.value.approved?.userId == userId }
         codes.entries.removeIf { it.value.identity.userId == userId }
     }

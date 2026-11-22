@@ -4,9 +4,12 @@ import dev.habittracker.shared.*
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Test
+import java.nio.file.Files
 import java.time.LocalDate
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -39,6 +42,92 @@ class StoreTest {
         assertNull(store.get(bob.userId,item.id)); assertTrue(store.list(bob.userId).isEmpty())
         assertEquals(item.id,store.list(alice.userId).single().id)
         store.revoke(alice.token); assertNull(store.authenticate(alice.token)); assertNotNull(store.authenticate(bob.token))
+    }
+    @Test fun `account deletion persists retryable purge jobs for all owned attachments`() {
+        val owner = account()
+        val other = account()
+        val dir = Files.createTempDirectory("habit-deletion-")
+        fun noteWithFile(userId: String, key: String): Attachment {
+            val fileId = UUID.randomUUID().toString()
+            val note = mutation(NoteContent("Файл", attachmentIds = listOf(fileId)))
+            store.mutate(userId, note)
+            return Attachment(fileId, note.itemId, "note.txt", "text/plain", 1).also {
+                store.saveAttachment(userId, it, key, "hash")
+            }
+        }
+        val retry = dir.resolve(UUID.randomUUID().toString())
+        val ready = dir.resolve(UUID.randomUUID().toString())
+        val kept = dir.resolve(UUID.randomUUID().toString())
+        val blockedFile = retry.resolve("actively-used")
+        try {
+            Files.createDirectory(retry)
+            Files.writeString(blockedFile, "simulate a failed delete")
+            Files.writeString(ready, "a")
+            Files.writeString(kept, "b")
+            val retryAttachment = noteWithFile(owner.userId, retry.fileName.toString())
+            noteWithFile(owner.userId, ready.fileName.toString())
+            val keptAttachment = noteWithFile(other.userId, kept.fileName.toString())
+
+            store.deleteAccount(owner.userId, owner.token)
+            assertNull(store.attachment(owner.userId, retryAttachment.id))
+            assertNotNull(store.attachment(other.userId, keptAttachment.id))
+            assertEquals(2, store.purgeDeletedAccountFiles(dir))
+            assertFalse(Files.exists(ready))
+            assertTrue(Files.exists(retry))
+            assertEquals(0, store.purgeDeletedAccountFiles(dir))
+
+            Files.delete(blockedFile)
+            postgres.postgresDatabase.connection.use { connection ->
+                connection.prepareStatement("UPDATE account_file_purge SET next_attempt_at=now() WHERE storage_key=?").use {
+                    it.setString(1, retry.fileName.toString())
+                    assertEquals(1, it.executeUpdate())
+                }
+            }
+            Store(postgres.getJdbcUrl("postgres","postgres"), "postgres", "").use { restarted ->
+                assertEquals(1, restarted.purgeDeletedAccountFiles(dir))
+                assertEquals(0, restarted.purgeDeletedAccountFiles(dir))
+            }
+            assertFalse(Files.exists(retry))
+            assertEquals("b", Files.readString(kept))
+        } finally {
+            Files.deleteIfExists(blockedFile)
+            Files.deleteIfExists(retry)
+            Files.deleteIfExists(ready)
+            Files.deleteIfExists(kept)
+            Files.deleteIfExists(dir)
+        }
+    }
+    @Test fun `a concurrent OAuth refresh cannot leave valid credentials after account deletion`() {
+        val owner = account()
+        val identity = checkNotNull(store.authenticate(owner.token))
+        val grant = store.issueOAuth(identity, "client", "https://resource/mcp")
+        val executor = Executors.newFixedThreadPool(2)
+        val start = CountDownLatch(1)
+        try {
+            val refresh = executor.submit<OAuthTokens?> {
+                start.await()
+                try {
+                    store.refreshOAuth(grant.refreshToken, "client", "https://resource/mcp")
+                } catch (failure: ApiFailure) {
+                    assertEquals(401, failure.status)
+                    null
+                }
+            }
+            val deletion = executor.submit {
+                start.await()
+                store.deleteAccount(owner.userId, owner.token)
+            }
+            start.countDown()
+            deletion.get(10, TimeUnit.SECONDS)
+            val rotated = refresh.get(10, TimeUnit.SECONDS)
+            assertNull(store.authenticate(grant.accessToken))
+            rotated?.let {
+                assertNull(store.authenticate(it.accessToken))
+                assertFailsWith<ApiFailure> { store.refreshOAuth(it.refreshToken, "client", "https://resource/mcp") }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
     }
     @Test fun `operation replay is persistent and mismatched reuse fails`() {
         val user = account(); val operation = mutation()

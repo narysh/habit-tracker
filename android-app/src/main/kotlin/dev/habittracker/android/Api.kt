@@ -30,22 +30,54 @@ class SessionPreferences(context: Context) {
         cipher.init(Cipher.DECRYPT_MODE,key(),GCMParameterSpec(128,Base64.decode(parts[0],Base64.NO_WRAP)))
         WireJson.decodeFromString<Session>(String(cipher.doFinal(Base64.decode(parts[1],Base64.NO_WRAP)),Charsets.UTF_8))
     } catch (_: Exception) { null } }
-    fun save(session: Session,baseUrl: String,storageKey: String = prefs.getString("store-${session.userId}-$baseUrl",null) ?: (session.userId + "-" + baseUrl.hashCode().toUInt().toString(16))) {
+    @Synchronized
+    fun save(session: Session,baseUrl: String,storageKey: String = prefs.getString("store-${session.userId}-$baseUrl",null) ?: (session.userId + "-" + baseUrl.hashCode().toUInt().toString(16)), automatic: Boolean = automatic()) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE,key()) }
         val payload = cipher.doFinal(WireJson.encodeToString(session).toByteArray())
         val encoded = Base64.encodeToString(cipher.iv,Base64.NO_WRAP) + ":" + Base64.encodeToString(payload,Base64.NO_WRAP)
-        check(prefs.edit().putString("session",encoded).putString("url",baseUrl).putString("storageKey",storageKey).putString("store-${session.userId}-$baseUrl",storageKey).commit())
+        check(prefs.edit().putString("session",encoded).putString("url",baseUrl).putString("storageKey",storageKey).putString("store-${session.userId}-$baseUrl",storageKey).putBoolean("automatic",automatic).commit())
     }
     fun storageKey(): String = prefs.getString("storageKey",null) ?: (requireNotNull(current()).userId + "-" + url().hashCode().toUInt().toString(16))
+    @Synchronized
     fun reconnect(session: Session,baseUrl: String) {
         val old=requireNotNull(current()) { "Сначала войди в аккаунт" }
         require(old.userId==session.userId && old.email==session.email) { "На этом сервере другой аккаунт. Текущие данные сохранены; адрес не изменён." }
-        save(session,baseUrl,storageKey())
+        save(session,baseUrl,storageKey(),automatic = false)
     }
-    fun url(): String = prefs.getString("url",if(android.os.Build.PRODUCT.contains("sdk")) "http://10.0.2.2:8081" else "")!!
-    fun automatic(): Boolean = prefs.getBoolean("automatic",!android.os.Build.PRODUCT.contains("sdk"))
-    fun automatic(enabled: Boolean) { check(prefs.edit().putBoolean("automatic",enabled).commit()) }
+    fun url(): String = prefs.getString("url",BuildConfig.BACKEND_ORIGIN.ifEmpty {
+        if(android.os.Build.PRODUCT.contains("sdk")) "http://10.0.2.2:8081" else ""
+    })!!
+    fun automatic(): Boolean = prefs.getBoolean("automatic",BuildConfig.BACKEND_ORIGIN.isNotEmpty() || !android.os.Build.PRODUCT.contains("sdk"))
+    @Synchronized
+    fun automatic(enabled: Boolean, verifiedUrl: String? = null) {
+        require(!enabled || automatic() || current()==null || verifiedUrl==url()) {
+            "Текущий аккаунт подключён к другому серверу. Выйди из аккаунта перед переключением."
+        }
+        check(prefs.edit().putBoolean("automatic",enabled).commit())
+    }
+
+    @Synchronized
+    fun followDiscoveredServer(expected: Session?, expectedUrl: String, verifiedUrl: String) {
+        if (expected != null && expectedUrl != verifiedUrl && automatic() && current() == expected && url() == expectedUrl) {
+            save(expected, verifiedUrl, storageKey())
+        }
+    }
+
+    @Synchronized
+    fun tokenFor(userId: String, serverUrl: String): String? =
+        current()?.takeIf { it.userId == userId && url() == serverUrl }?.token
+
+    @Synchronized
     fun clear() { prefs.edit().remove("session").commit() }
+
+    @Synchronized
+    fun clearAccount() {
+        val userId=current()?.userId
+        val baseUrl=prefs.getString("url",null)
+        val editor=prefs.edit().remove("session").remove("storageKey")
+        if(userId!=null && baseUrl!=null) editor.remove("store-$userId-$baseUrl")
+        check(editor.commit())
+    }
 }
 class NetworkFailure(val status: Int,message: String) : java.io.IOException(message)
 class Api(private val baseUrl: String,private val token: () -> String? = { null }) {

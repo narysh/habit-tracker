@@ -1,0 +1,14 @@
+{
+	admin off
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$PUBLIC_URL} {
+	import policies/*.caddy
+
+	reverse_proxy backend:8081 {
+		header_up X-Real-IP {remote_host}
+	}
+}

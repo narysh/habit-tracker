@@ -27,9 +27,8 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
     private suspend fun <T> transaction(block: suspend ()->T): T = database.useWriterConnection { it.immediateTransaction { block() } }
     suspend fun <T> exclusive(block: suspend ()->T): T=mutex.withLock {block()}
     private val api get() = Api(serverUrl) {
-        val active=app.preferences.current()
-        if(active?.userId!=session.userId || app.preferences.url()!=serverUrl) throw NetworkFailure(401,"Аккаунт изменился; синхронизация остановлена")
-        active.token
+        app.preferences.tokenFor(session.userId, serverUrl)
+            ?: throw NetworkFailure(401,"Аккаунт изменился; синхронизация остановлена")
     }
     suspend fun save(content: Content,id: String=UUID.randomUUID().toString(),deleted: Boolean=false,notify: Boolean=true) {
         transaction {
@@ -185,23 +184,36 @@ class HabitApplication : android.app.Application() {
     lateinit var preferences: SessionPreferences; private set
     lateinit var shareInbox: ShareInbox; private set
     val shortcut=kotlinx.coroutines.flow.MutableStateFlow(false)
+    val discovery by lazy { ServerDiscovery(this) }
     @Volatile private var cached: Repository? = null
     override fun onCreate() { super.onCreate(); preferences=SessionPreferences(this);shareInbox=ShareInbox(this) }
+    fun resolveAccountServer(): String? {
+        if (!preferences.automatic()) return preferences.current()?.let { preferences.url() }
+        val active = preferences.current()
+        val previousUrl = preferences.url()
+        val verified = discovery.resolve()
+        if (BuildConfig.BACKEND_ORIGIN.isEmpty()) preferences.followDiscoveredServer(active, previousUrl, verified)
+        return if (preferences.current() == null && preferences.automatic()) verified else preferences.url()
+    }
     @Synchronized fun repository(): Repository? {
         val session=preferences.current() ?: return null
         if(cached?.session?.userId != session.userId || cached?.serverUrl != preferences.url()) cached=Repository(this,session)
         return cached
+    }
+    @Synchronized fun deleteLocalAccountData() {
+        val key=preferences.storageKey()
+        cached?.database?.close()
+        cached=null
+        deleteDatabase("tracker-$key.db")
+        File(filesDir,"attachments/$key").deleteRecursively()
+        preferences.clearAccount()
     }
 }
 class SyncWorker(context: Context,params: WorkerParameters) : CoroutineWorker(context,params) {
     override suspend fun doWork(): Result = try {
         val app=applicationContext as HabitApplication
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            if(app.preferences.automatic()) {
-                val url=ServerDiscovery(app).resolve()
-                val session=app.preferences.current()
-                if(session!=null && app.preferences.url()!=url) app.preferences.save(session,url,app.preferences.storageKey())
-            }
+            app.resolveAccountServer()
             app.repository()?.synchronize()
         }
         Result.success()

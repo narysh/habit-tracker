@@ -8,6 +8,7 @@ import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Instant
+import java.nio.file.Path
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.Locale
@@ -28,6 +29,12 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
     private fun <T> tx(block: (Connection) -> T): T = pool.connection.use { c ->
         c.autoCommit = false
         try { val result = block(c); c.commit(); result } catch (e: Throwable) { c.rollback(); throw e }
+    }
+    private fun lockAccount(c: Connection, userId: String) {
+        c.prepareStatement("SELECT id FROM users WHERE id=?::uuid FOR UPDATE").use { statement ->
+            statement.setString(1, userId)
+            statement.executeQuery().use { if (!it.next()) throw ApiFailure(401, "Войди в аккаунт") }
+        }
     }
     private fun normalize(email: String): String = email.trim().lowercase(Locale.ROOT)
     fun register(credentials: Credentials): Session {
@@ -68,6 +75,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         val existing=c.prepareStatement("SELECT user_id FROM social_identities WHERE provider=? AND subject=?").use { p -> p.setString(1,provider);p.setString(2,subject);p.executeQuery().use { if(it.next()) it.getString(1) else null } }
         if(existing!=null && linkUser!=null && existing!=linkUser) throw ApiFailure(409,"Этот способ входа уже привязан к другому аккаунту")
         val id=existing ?: linkUser ?: UUID.randomUUID().toString()
+        if (existing != null || linkUser != null) lockAccount(c, id)
         if(existing==null) {
             if(linkUser==null) {
                 val address=email?.trim()?.lowercase()?.takeIf { it.length<=254 && Regex("[^\\s@]+@[^\\s@]+\\.[^\\s@]+").matches(it) } ?: "$provider-${digest(subject).take(32)}@identity.invalid"
@@ -84,10 +92,13 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
     }
     fun newSession(identity: Identity, hours: Long = 24 * 30): Session {
         val token = secret(); val expiry = Instant.now().plusSeconds(hours * 3600)
-        tx { c -> c.prepareStatement("INSERT INTO sessions VALUES (?,?::uuid,?,?)").use {
-            it.setString(1,digest(token)); it.setString(2,identity.userId); it.setString(3,identity.scopes.sorted().joinToString(" "))
-            it.setTimestamp(4,Timestamp.from(expiry)); it.executeUpdate()
-        } }
+        tx { c ->
+            lockAccount(c, identity.userId)
+            c.prepareStatement("INSERT INTO sessions (token_hash,user_id,scopes,expires_at) VALUES (?,?::uuid,?,?)").use {
+                it.setString(1,digest(token)); it.setString(2,identity.userId); it.setString(3,identity.scopes.sorted().joinToString(" "))
+                it.setTimestamp(4,Timestamp.from(expiry)); it.executeUpdate()
+            }
+        }
         return Session(token,identity.userId,identity.email,expiry.toString())
     }
     fun authenticate(token: String, appSessionOnly: Boolean = false): Identity? = pool.connection.use { c -> c.prepareStatement(
@@ -146,19 +157,41 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         c.prepareStatement("DELETE FROM sessions WHERE token_hash=? OR token_hash=?").use { it.setString(1,hash); it.setString(2,access ?: hash); it.executeUpdate() }
     } }
     fun revokeAll(userId: String) { tx { c -> c.prepareStatement("DELETE FROM sessions WHERE user_id=?::uuid").use { it.setString(1,userId); it.executeUpdate() } } }
+    fun deleteAccount(userId: String, appToken: String) = tx { c ->
+        lockAccount(c, userId)
+        deleteAccountRows(c, userId, digest(appToken))
+    }
+    fun accountExists(userId: String): Boolean = pool.connection.use { c ->
+        c.prepareStatement("SELECT 1 FROM users WHERE id=?::uuid").use { statement ->
+            statement.setString(1, userId)
+            statement.executeQuery().use { it.next() }
+        }
+    }
+    fun purgeDeletedAccountFiles(directory: Path): Int = tx { c -> purgeAccountFiles(c, directory) }
+
     private fun issueOAuth(c: Connection,identity: Identity,clientId: String,resource: String): OAuthTokens {
+        lockAccount(c, identity.userId)
         val access=secret(); val refresh=secret(); val now=Instant.now(); val scopes=identity.scopes.sorted().joinToString(" ")
-        c.prepareStatement("INSERT INTO sessions VALUES (?,?::uuid,?,?)").use { it.setString(1,digest(access));it.setString(2,identity.userId);it.setString(3,scopes);it.setTimestamp(4,Timestamp.from(now.plusSeconds(3600)));it.executeUpdate() }
+        c.prepareStatement("INSERT INTO sessions (token_hash,user_id,scopes,expires_at) VALUES (?,?::uuid,?,?)").use { it.setString(1,digest(access));it.setString(2,identity.userId);it.setString(3,scopes);it.setTimestamp(4,Timestamp.from(now.plusSeconds(3600)));it.executeUpdate() }
         c.prepareStatement("INSERT INTO oauth_refresh_tokens VALUES (?,?,?::uuid,?,?,?,?)").use { it.setString(1,digest(refresh));it.setString(2,digest(access));it.setString(3,identity.userId);it.setString(4,clientId);it.setString(5,resource);it.setString(6,scopes);it.setTimestamp(7,Timestamp.from(now.plusSeconds(30L*24*3600)));it.executeUpdate() }
         return OAuthTokens(access,refresh,scopes)
     }
     fun issueOAuth(identity: Identity,clientId: String,resource: String): OAuthTokens = tx { issueOAuth(it,identity,clientId,resource) }
     fun refreshOAuth(refresh: String,clientId: String,resource: String): OAuthTokens = tx { c ->
-        val grant=c.prepareStatement("SELECT r.user_id,u.email,r.scopes,r.access_hash,r.client_id,r.resource FROM oauth_refresh_tokens r JOIN users u ON u.id=r.user_id WHERE r.token_hash=? AND r.expires_at>now() FOR UPDATE OF r").use {
-            it.setString(1,digest(refresh)); it.executeQuery().use { r -> if(!r.next()) throw ApiFailure(401,"invalid_grant") else listOf(r.getString(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),r.getString(6)) }
+        val refreshHash = digest(refresh)
+        val userId = c.prepareStatement("SELECT user_id FROM oauth_refresh_tokens WHERE token_hash=?").use { statement ->
+            statement.setString(1, refreshHash)
+            statement.executeQuery().use { if (it.next()) it.getString(1) else throw ApiFailure(401, "invalid_grant") }
+        }
+        lockAccount(c, userId)
+        val grant=c.prepareStatement("SELECT r.user_id,u.email,r.scopes,r.access_hash,r.client_id,r.resource FROM oauth_refresh_tokens r JOIN users u ON u.id=r.user_id WHERE r.token_hash=? AND r.expires_at>now()").use {
+            it.setString(1,refreshHash); it.executeQuery().use { r -> if(!r.next()) throw ApiFailure(401,"invalid_grant") else listOf(r.getString(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),r.getString(6)) }
         }
         require(grant[4]==clientId && grant[5]==resource) { "Invalid refresh token binding" }
-        c.prepareStatement("DELETE FROM sessions WHERE token_hash=?").use { it.setString(1,grant[3]);it.executeUpdate() }
+        c.prepareStatement("DELETE FROM sessions WHERE token_hash=?").use {
+            it.setString(1,grant[3])
+            if (it.executeUpdate() != 1) throw ApiFailure(401, "invalid_grant")
+        }
         issueOAuth(c,Identity(grant[0],grant[1],grant[2].split(' ').toSet()),clientId,resource)
     }
     fun list(userId: String): List<Item> = pool.connection.use { c -> c.prepareStatement("SELECT * FROM items WHERE user_id=?::uuid ORDER BY sequence").use {
@@ -174,7 +207,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         UUID.fromString(mutation.operationId); UUID.fromString(mutation.itemId)
         require(mutation.baseVersion >= 0)
         // One account's sequence and operation journal advance in commit order.
-        c.prepareStatement("SELECT revision FROM users WHERE id=?::uuid FOR UPDATE").use { it.setString(1,userId); it.executeQuery().use { r -> check(r.next()) } }
+        lockAccount(c, userId)
         val request = WireJson.encodeToString(mutation)
         val replay = c.prepareStatement("SELECT request,result FROM operations WHERE user_id=?::uuid AND id=?::uuid").use {
             it.setString(1,userId); it.setString(2,mutation.operationId)
@@ -241,7 +274,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
     }
     fun applyWeekPlan(userId: String,id: String,expectedVersion: Long): Item = tx { c ->
         UUID.fromString(id)
-        c.prepareStatement("SELECT revision FROM users WHERE id=?::uuid FOR UPDATE").use {it.setString(1,userId);it.executeQuery().use {r->check(r.next())}}
+        lockAccount(c, userId)
         val item=find(c,userId,id) ?: throw ApiFailure(404,"План не найден")
         val plan=item.content as? WeekPlanContent ?: throw ApiFailure(400,"Это не план недели")
         require(!item.deleted)
@@ -278,6 +311,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         it.setString(1,userId); it.setString(2,noteId); it.executeQuery().use { r -> buildList { while(r.next()) add(Attachment(r.getString("id"),r.getString("note_id"),r.getString("filename"),r.getString("media_type"),r.getLong("size"))) } }
     } }
     fun saveAttachment(userId: String, attachment: Attachment, storageKey: String, hash: String) = tx { c ->
+        lockAccount(c, userId)
         val note = find(c,userId,attachment.noteId) ?: throw ApiFailure(404,"Заметка не найдена")
         val content = note.content as? NoteContent
         require(!note.deleted && content != null && attachment.id in content.attachmentIds)

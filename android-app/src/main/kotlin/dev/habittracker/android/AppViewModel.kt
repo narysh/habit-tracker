@@ -43,34 +43,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val backupPreview=MutableStateFlow<BackupPreview?>(null)
     val reminderSettings=MutableStateFlow(Reminders.settings(app))
     private var socialJob: Job?=null
-    private val discovery=ServerDiscovery(app)
     init { if(session.value!=null) { periodic(); synchronize() } }
     suspend fun findServer() {
         try { prepareConnection() }
         catch(e: java.io.IOException) { syncStatus.value="Нет связи с сервером. Повторим автоматически." }
         catch(e: IllegalArgumentException) { syncStatus.value=e.message ?: "Ошибка адреса сервера" }
     }
-    private suspend fun prepareConnection(): String = withContext(Dispatchers.IO) {
-        val url=if(app.preferences.automatic()) discovery.resolve() else serverUrl.value
+    private suspend fun prepareConnection(refreshProviders: Boolean = true): String = withContext(Dispatchers.IO) {
+        val url=app.resolveAccountServer() ?: serverUrl.value
         if(url.isNotBlank()) {
-            val active=app.preferences.current()
-            if(active!=null && app.preferences.url()!=url) {
-                app.preferences.save(active,url,app.preferences.storageKey());repository.value=app.repository()
-            }
+            repository.value=app.repository()
             serverUrl.value=url
-            providers.value=Api(url) { active?.token }.get("/api/v1/auth/social/providers")
+            if(refreshProviders) {
+                val account=app.preferences.current()
+                providers.value=Api(url) { account?.let { app.preferences.tokenFor(it.userId,url) } }.get("/api/v1/auth/social/providers")
+            }
         }
         url
     }
-    fun automaticConnection(enabled: Boolean) { app.preferences.automatic(enabled);action { prepareConnection() } }
+    fun automaticConnection(enabled: Boolean) {
+        if (!enabled || app.preferences.current() == null) {
+            app.preferences.automatic(enabled)
+            action { prepareConnection() }
+        } else {
+            action {
+                app.preferences.automatic(true, app.discovery.resolve())
+                prepareConnection()
+            }
+        }
+    }
     fun manualAddress(url: String) { serverUrl.value=url }
     fun socialLogin(provider: String,link: Boolean=false) {
         if(socialBusy.value) return
         socialBusy.value=true
         socialJob=viewModelScope.launch(Dispatchers.IO) {
             try {
+                val automatic=app.preferences.automatic()
+                val linkedUserId=if(link) requireNotNull(session.value).userId else null
                 val url=prepareConnection()
-                val api=Api(url) { if(link) session.value?.token else null }
+                val api=Api(url) { linkedUserId?.let { app.preferences.tokenFor(it,url) } }
                 val verifier=Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also {SecureRandom().nextBytes(it)})
                 val challenge=Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
                 val attempt=api.post<SocialStart,SocialAttempt>("/api/v1/auth/social/start",SocialStart(provider,challenge,link))
@@ -80,7 +91,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val result=api.post<SocialPoll,SocialResult>("/api/v1/auth/social/poll",SocialPoll(attempt.id,verifier))
                     currentCoroutineContext().ensureActive()
                     when(result.status) {
-                        "DONE"->{val signedIn=requireNotNull(result.session);app.preferences.save(signedIn,url);repository.value=app.repository();session.value=signedIn;periodic();refreshFromServer();return@launch}
+                        "DONE"->{val signedIn=requireNotNull(result.session);app.preferences.save(signedIn,url,automatic=automatic);repository.value=app.repository();session.value=signedIn;periodic();refreshFromServer();return@launch}
                         "LINKED"->{prepareConnection();message.value="Способ входа привязан";return@launch}
                         "FAILED"->throw IllegalStateException(result.message ?: "Вход отменён")
                     }
@@ -111,9 +122,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val endpoint = app.preferences.url()
         require(Uri.parse(endpoint).scheme == "https") { "Для подключения ChatGPT нужен HTTPS-сервер Habit Tracker" }
         return Api(endpoint) {
-            val current = app.preferences.current()
-            check(current == account && app.preferences.url() == endpoint) { "Аккаунт или сервер изменился. Начни подключение заново." }
-            current.token
+            check(app.preferences.tokenFor(account.userId,endpoint) == account.token) { "Аккаунт или сервер изменился. Начни подключение заново." }
+            account.token
         }
     }
     private fun action(block: suspend ()->Unit) { viewModelScope.launch(Dispatchers.IO) { try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { message.value=e.message ?: "Не удалось выполнить действие" } } }
@@ -125,7 +135,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val email=requireNotNull(session.value).email
                 val result=Api(normalized).post<Credentials,Session>("/api/v1/auth/login",Credentials(email,password))
                 app.preferences.reconnect(result,normalized)
-                app.preferences.automatic(false);serverUrl.value=normalized
+                serverUrl.value=normalized
                 repository.value=app.repository(); session.value=result
                 periodic(); refreshFromServer()
                 withContext(Dispatchers.Main) { after() }
@@ -136,10 +146,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         busy.value=true
         action {
             try {
-                val normalized=(if(app.preferences.automatic()) prepareConnection() else url).trim().trimEnd('/')
+                val automatic=app.preferences.automatic()
+                val normalized=(if(automatic) prepareConnection() else url).trim().trimEnd('/')
                 val result=Api(normalized).post<Credentials,Session>("/api/v1/auth/${if(register) "register" else "login"}",Credentials(email.trim(),password))
                 UUID.fromString(result.userId)
-                app.preferences.save(result,normalized)
+                app.preferences.save(result,normalized,automatic=automatic)
                 repository.value=app.repository(); session.value=result; periodic(); synchronize()
             } finally { busy.value=false }
         }
@@ -155,7 +166,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     suspend fun refreshFromServer() = withContext(Dispatchers.IO) {
         try {
-            prepareConnection()
+            prepareConnection(refreshProviders=false)
             repository.value?.synchronize()
             syncStatus.value="Синхронизировано · ${java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))}"
         } catch(e: NetworkFailure) {
@@ -204,4 +215,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         session.value=null; repository.value=null
         TrackerWidget.updateAll(app)
     }
+    fun deleteAccount() = action {
+        val account=requireNotNull(session.value) { "Сначала войди в аккаунт" }
+        busy.value=true
+        try {
+            Api(app.preferences.url()) { account.token }.request(
+                "/api/v1/account/delete", "POST",
+                WireJson.encodeToString(AccountDeletionRequest("DELETE")).toByteArray()
+            )
+            cancelSocialLogin()
+            WorkManager.getInstance(app).cancelAllWork()
+            app.deleteLocalAccountData()
+            Reminders.clear(app)
+            session.value=null
+            repository.value=null
+            TrackerWidget.updateAll(app)
+            message.value="Аккаунт и облачные данные удалены"
+        } finally { busy.value=false }
+    }
 }
+
+@kotlinx.serialization.Serializable
+private data class AccountDeletionRequest(val confirmation: String)

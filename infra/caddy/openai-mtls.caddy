@@ -1,0 +1,12 @@
+tls {
+	client_auth {
+		mode verify_if_given
+		trust_pool file /etc/caddy/openai-connectors-intermediate.pem
+	}
+}
+
+@mcp_without_openai_identity {
+	path /mcp /mcp/*
+	not expression `'mtls.prod.connectors.openai.com' in {http.request.tls.client.san.dns_names}`
+}
+respond @mcp_without_openai_identity 403

@@ -1,9 +1,30 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     kotlin("plugin.serialization")
     id("com.google.devtools.ksp")
 }
+
+val backendOrigin = providers.gradleProperty("habitTrackerOrigin").orElse("").get().trim().trimEnd('/')
+if (backendOrigin.isNotEmpty()) {
+    val uri = URI(backendOrigin)
+    require(uri.scheme == "https" && uri.host != null && uri.userInfo == null && uri.path.isNullOrEmpty() &&
+        uri.query == null && uri.fragment == null && (uri.port == -1 || uri.port in 1..65535)) {
+        "habitTrackerOrigin must be an HTTPS origin without a path or credentials"
+    }
+}
+
+val releaseSigning = listOf("STORE_FILE", "STORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD").associateWith {
+    providers.environmentVariable("HABIT_TRACKER_SIGNING_$it").orNull?.takeIf(String::isNotBlank)
+}
+val hasReleaseSigning = releaseSigning.values.any { it != null }
+if (hasReleaseSigning) {
+    require(releaseSigning.values.all { it != null }) { "Set all four HABIT_TRACKER_SIGNING_* variables for release signing" }
+    require(backendOrigin.isNotEmpty()) { "Set -PhabitTrackerOrigin to the release HTTPS backend before signing" }
+}
+
 android {
     namespace = "dev.habittracker.android"
     compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -13,9 +34,19 @@ android {
         targetSdk = 35
         versionCode = 5
         versionName = "0.5.0-preview.1"
+        buildConfigField("String", "BACKEND_ORIGIN", "\"$backendOrigin\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    buildFeatures { compose = true }
+    if (hasReleaseSigning) {
+        val releaseKey = signingConfigs.create("distribution") {
+            storeFile = rootProject.file(releaseSigning.getValue("STORE_FILE")!!)
+            storePassword = releaseSigning.getValue("STORE_PASSWORD")
+            keyAlias = releaseSigning.getValue("KEY_ALIAS")
+            keyPassword = releaseSigning.getValue("KEY_PASSWORD")
+        }
+        buildTypes.getByName("release").signingConfig = releaseKey
+    }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }

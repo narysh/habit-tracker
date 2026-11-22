@@ -103,6 +103,7 @@ private fun Content.description(): String = when(this) {
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.message.value=null } }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var settings by remember { mutableStateOf(false) }
+    var confirmAccountDeletion by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
     var socialSettings by remember { mutableStateOf(false) }
     var chatGptLink by remember(session?.userId) { mutableStateOf(false) }
@@ -211,7 +212,18 @@ private fun Content.description(): String = when(this) {
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
     if(chatGptLink) session?.let { account -> ChatGptLinkDialog(vm, account) { chatGptLink=false } }
     if(connection) ConnectionDialog(vm) { connection=false }
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(confirmAccountDeletion) AlertDialog(
+        onDismissRequest={if(!busy)confirmAccountDeletion=false},
+        title={Text("Удалить аккаунт безвозвратно?",color=MaterialTheme.colorScheme.error)},
+        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
+            Text("Будут удалены аккаунт, все задачи, привычки, заметки и вложения в облаке, а также локальные данные этого аккаунта на телефоне. Восстановить их нельзя.")
+            Text("Для защиты от случайного удаления нужно было войти заново в течение последних 10 минут. Если сервер попросит войти снова, отмена удаления сохранит данные.",style=MaterialTheme.typography.bodySmall)
+            if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        }},
+        confirmButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false;vm.deleteAccount()},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)){Text("Удалить аккаунт и данные")}},
+        dismissButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false}){Text("Отмена")}}
+    )
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
@@ -243,6 +255,7 @@ private fun Content.description(): String = when(this) {
     if(pending) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Заверши вход у провайдера и вернись сюда."); TextButton(onClick={vm.cancelSocialLogin()}){Text("Отменить вход")} }
 }
 @Composable private fun SocialAccountDialog(vm: AppViewModel,onClose: ()->Unit) {
+    LaunchedEffect(vm) { vm.findServer() }
     AlertDialog(onDismissRequest=onClose,title={Text("Способы входа")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
         Text("Привязка добавляет способ входа к текущему аккаунту. Данные останутся общими.")
         SocialButtons(vm,true)

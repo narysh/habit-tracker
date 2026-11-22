@@ -25,6 +25,102 @@ class HttpIntegrationTest {
     }
     @AfterAll fun stop() { if(::store.isInitialized) store.close(); if(::pg.isInitialized) pg.close() }
     private fun user()=store.register(Credentials("${UUID.randomUUID()}@http.test","test-password-123"))
+    private suspend fun io.ktor.client.HttpClient.requestAccountDeletion(token: String?, confirmation: String = "DELETE") =
+        post("/api/v1/account/delete") {
+            token?.let { bearerAuth(it) }
+            contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(AccountDeletionRequest(confirmation)))
+        }
+
+    @Test fun `account deletion requires recent app sign in and confirmation and preserves other accounts`() = testApplication {
+        application { backendModule(settings, store) }
+        val owner = user()
+        val credentials = Credentials(owner.email, "test-password-123")
+        val other = user()
+        val identity = checkNotNull(store.authenticate(owner.token))
+        val legacy = store.login(credentials)
+        pg.postgresDatabase.connection.use { c ->
+            c.prepareStatement("UPDATE sessions SET issued_at=CASE WHEN token_hash=? THEN NULL ELSE now()-INTERVAL '11 minutes' END WHERE token_hash IN (?,?)").use {
+                it.setString(1, digest(legacy.token))
+                it.setString(2, digest(legacy.token))
+                it.setString(3, digest(owner.token))
+                assertEquals(2, it.executeUpdate())
+            }
+        }
+        val current = store.login(credentials)
+        val oauth = store.issueOAuth(identity, settings.clientId, settings.resource)
+        val noteId = UUID.randomUUID().toString()
+        val note = Mutation(UUID.randomUUID().toString(), noteId, 0, NoteContent("Только владельцу"))
+        store.mutate(owner.userId, note)
+        store.mutate(other.userId, note.copy(content = NoteContent("Сохранить")))
+
+        assertEquals(HttpStatusCode.Unauthorized, client.requestAccountDeletion(null).status)
+        assertEquals(HttpStatusCode.Unauthorized, client.requestAccountDeletion(oauth.accessToken).status)
+        assertEquals(HttpStatusCode.Forbidden, client.requestAccountDeletion(owner.token).status)
+        assertEquals(HttpStatusCode.Forbidden, client.requestAccountDeletion(legacy.token).status)
+        assertEquals(HttpStatusCode.BadRequest, client.requestAccountDeletion(current.token, "CANCEL").status)
+        assertEquals("Только владельцу", store.get(owner.userId, noteId)?.content?.title)
+
+        val deleted = client.requestAccountDeletion(current.token)
+        assertEquals(HttpStatusCode.NoContent, deleted.status, deleted.bodyAsText())
+        for (token in listOf(owner.token, legacy.token, current.token, oauth.accessToken)) {
+            assertNull(store.authenticate(token))
+        }
+        assertFailsWith<ApiFailure> { store.refreshOAuth(oauth.refreshToken, settings.clientId, settings.resource) }
+        assertFailsWith<ApiFailure> { store.login(credentials) }
+        assertNull(store.get(owner.userId, noteId))
+        assertEquals("Сохранить", store.get(other.userId, noteId)?.content?.title)
+        assertNotNull(store.authenticate(other.token))
+        val recreated = store.register(credentials)
+        assertNotEquals(owner.userId, recreated.userId)
+        assertTrue(store.list(recreated.userId).isEmpty())
+    }
+
+    @Test fun `social account deletion revokes approved app pairing and rejects pending social linking`() = testApplication {
+        val plugin = settings.copy(publicPlugin = true, publicUrl = "https://tracker.example.test",
+            redirects = setOf("https://chatgpt.com/connector_platform_oauth_redirect"))
+        val config = ProviderConfig("google", "Google", "fake-id", "fake-secret", "https://tracker.example.test/provider-callback")
+        val subject = UUID.randomUUID().toString()
+        val social = SocialLogin(store, mapOf("google" to config)) { _, _, _, _, _ -> ProviderPerson(subject, null) }
+        application { backendModule(plugin, store, social) }
+        val verifier = secret()
+        val signIn = social.start(SocialStart("google", challenge(verifier)), null)
+        social.callback("google", signIn.id, "code", null, null)
+        val owner = checkNotNull(social.poll(SocialPoll(signIn.id, verifier)).session)
+        val linking = social.start(SocialStart("google", challenge(verifier), true), store.authenticate(owner.token), owner.token)
+        val page = client.get("/oauth/authorize") {
+            url {
+                parameters.appendAll(Parameters.build {
+                    append("client_id", plugin.clientId)
+                    append("redirect_uri", plugin.redirects.single())
+                    append("response_type", "code")
+                    append("state", "deletion-test")
+                    append("code_challenge", challenge(verifier))
+                    append("code_challenge_method", "S256")
+                    append("resource", plugin.resource)
+                })
+            }
+        }
+        assertEquals(HttpStatusCode.OK, page.status)
+        val consent = page.bodyAsText()
+        val nonce = checkNotNull(Regex("name=\"nonce\" value=\"([^\"]+)\"").find(consent)).groupValues[1]
+        val appCode = checkNotNull(Regex("id=\"app-code\">([^<]+)").find(consent)).groupValues[1]
+        assertEquals(HttpStatusCode.NoContent, client.post("/api/v1/account/chatgpt/approve") {
+            bearerAuth(owner.token)
+            contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(ChatGptLinkRequest(appCode)))
+        }.status)
+
+        assertEquals(HttpStatusCode.NoContent, client.requestAccountDeletion(owner.token).status)
+        assertEquals(HttpStatusCode.Gone, client.post("/oauth/app-consent") {
+            contentType(ContentType.Application.FormUrlEncoded)
+            setBody(listOf("nonce" to nonce).formUrlEncode())
+        }.status)
+        assertEquals(400, assertFailsWith<ApiFailure> { social.callback("google", linking.id, "code", null, null) }.status)
+        assertTrue(store.linkedProviders(owner.userId).isEmpty())
+        assertNotEquals(owner.userId, store.socialIdentity("google", subject, null, null).userId)
+    }
+
     @Test fun `readiness detects unavailable database without leaking error details`() {
         val independentStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
         independentStore.use {

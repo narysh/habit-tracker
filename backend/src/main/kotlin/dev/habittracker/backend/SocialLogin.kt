@@ -53,7 +53,7 @@ class ProviderGateway {
 class SocialLogin(private val store: Store,val configs: Map<String,ProviderConfig> = environment(),private val exchange: (ProviderConfig,String,String,String,String?)->ProviderPerson = ProviderGateway()::exchange) {
     private class Pending(val config: ProviderConfig,val challenge: String,val linkUser: String?,val linkToken: String?,val verifier: String=secret(),val expires: Instant=Instant.now().plusSeconds(300)) {
         var consumed=false
-        var result: SocialResult?=null
+        @Volatile var result: SocialResult?=null
     }
     private val pending=ConcurrentHashMap<String,Pending>()
     fun providers(identity: Identity?): List<SocialProviderInfo> {
@@ -98,7 +98,15 @@ class SocialLogin(private val store: Store,val configs: Map<String,ProviderConfi
             if(!equalSecrets(challenge(request.verifier),attempt.challenge)) throw ApiFailure(403,"Неверный ключ попытки")
             val result=attempt.result ?: return SocialResult("WAITING")
             pending.remove(request.id)
+            if (result.session?.let { store.authenticate(it.token, appSessionOnly = true) == null } == true) {
+                throw ApiFailure(410, "Попытка входа больше не действует")
+            }
             return result
+        }
+    }
+    fun removeAttemptsForAccount(userId: String) {
+        pending.entries.removeIf { (_, attempt) ->
+            attempt.linkUser == userId || attempt.result?.session?.userId == userId
         }
     }
     companion object {

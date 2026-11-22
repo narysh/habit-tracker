@@ -10,6 +10,7 @@ class ServerDiscovery(context: Context) {
     private var checkedAt=0L
     private var cached: String?=null
     @Synchronized fun resolve(force: Boolean=false): String {
+        if(BuildConfig.BACKEND_ORIGIN.isNotEmpty()) return BuildConfig.BACKEND_ORIGIN
         if(!force && cached!=null && System.currentTimeMillis()-checkedAt<60_000) return cached!!
         val stamp=System.currentTimeMillis()/30_000
         val address=Api("https://raw.githubusercontent.com/narysh/habit-tracker/connection").get<ConnectionAddress>("/connection.json?refresh=$stamp").url.trimEnd('/')

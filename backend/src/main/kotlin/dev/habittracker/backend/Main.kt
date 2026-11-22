@@ -15,12 +15,16 @@ import io.ktor.server.routing.*
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStatelessStreamableHttp
 import io.ktor.util.AttributeKey
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.sql.SQLException
 import java.util.UUID
 
 private val identityKey = AttributeKey<Identity>("identity")
@@ -50,6 +54,17 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
     val throttle = LoginThrottle()
     val linkThrottle = LoginThrottle()
     Files.createDirectories(settings.files)
+    launch(Dispatchers.IO) {
+        while (isActive) {
+            try {
+                val attempted = store.purgeDeletedAccountFiles(settings.files)
+                if (attempted == 64) continue
+            } catch (_: SQLException) {
+                logger.warn("Account file purge paused until the database is available")
+            }
+            delay(30_000)
+        }
+    }
     install(ContentNegotiation) { json(Json(WireJson) { explicitNulls=false; serializersModule=io.modelcontextprotocol.kotlin.sdk.types.McpJson.serializersModule }) }
     install(RequestBodyLimit) { bodyLimit { if(it.request.path().startsWith("/api/v1/attachments/")) 20L*1024*1024 else 8L*1024*1024 } }
     install(StatusPages) {
@@ -78,7 +93,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 val identity = withContext(Dispatchers.IO) {
                     when {
                         settings.publicPlugin && path == "/mcp" -> store.authenticatePlugin(token, settings.clientId, settings.resource)
-                        else -> store.authenticate(token, appSessionOnly = settings.publicPlugin)
+                        else -> store.authenticate(token, appSessionOnly = settings.publicPlugin || path == "/api/v1/account/delete")
                     }
                 }
                 if(identity == null) {
@@ -126,7 +141,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             }
             post("/auth/social/poll") {
                 val request=call.receive<SocialPoll>();require(request.verifier.length in 43..128)
-                call.respond(social.poll(request))
+                call.respond(withContext(Dispatchers.IO) { social.poll(request) })
             }
             post("/auth/register") {
                 throttle.check(call.rateLimitHost(settings))
@@ -140,6 +155,16 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             }
             post("/logout") { withContext(Dispatchers.IO) { store.revoke(call.attributes[tokenKey]) }; call.respond(HttpStatusCode.NoContent) }
             post("/account/revoke-sessions") { withContext(Dispatchers.IO) { store.revokeAll(call.attributes[identityKey].userId) }; call.respond(HttpStatusCode.NoContent) }
+            post("/account/delete") {
+                require(call.receive<AccountDeletionRequest>().confirmation == "DELETE") { "Подтверди удаление аккаунта" }
+                val userId = call.attributes[identityKey].userId
+                val token = call.attributes[tokenKey]
+                withContext(Dispatchers.IO) {
+                    oauth.deleteAccount(userId, token)
+                    social.removeAttemptsForAccount(userId)
+                }
+                call.respond(HttpStatusCode.NoContent)
+            }
             get("/account/chatgpt") {
                 val connected = settings.publicPlugin && withContext(Dispatchers.IO) {
                     store.hasOAuthConnection(call.attributes[identityKey].userId, settings.clientId, settings.resource)
@@ -157,7 +182,8 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             post("/account/chatgpt/approve") {
                 val identity = call.attributes[identityKey]
                 linkThrottle.check(identity.userId)
-                oauth.approveAppLink(call.receive<ChatGptLinkRequest>().code, identity)
+                val code = call.receive<ChatGptLinkRequest>().code
+                withContext(Dispatchers.IO) { oauth.approveAppLink(code, call.attributes[tokenKey]) }
                 call.respond(HttpStatusCode.NoContent)
             }
             get("/items") { call.respond(withContext(Dispatchers.IO) { store.list(call.attributes[identityKey].userId) }) }
@@ -252,8 +278,12 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             throttle.check(call.rateLimitHost(settings))
             val form = call.receiveParameters()
             val allow = form["decision"] == "allow"
-            val identity = if(allow) withContext(Dispatchers.IO) { store.checkPassword(Credentials(form["email"].orEmpty(),form["password"].orEmpty())) } ?: throw ApiFailure(401,"Неверный email или пароль") else null
-            call.respondRedirect(oauth.finish(form["nonce"].orEmpty(),identity,allow))
+            val redirect = withContext(Dispatchers.IO) {
+                val identity = if (allow) store.checkPassword(Credentials(form["email"].orEmpty(), form["password"].orEmpty()))
+                    ?: throw ApiFailure(401, "Неверный email или пароль") else null
+                oauth.finish(form["nonce"].orEmpty(), identity, allow)
+            }
+            call.respondRedirect(redirect)
         }
         post("/oauth/token") {
             val params = call.receiveParameters().entries().associate { it.key to it.value.single() }

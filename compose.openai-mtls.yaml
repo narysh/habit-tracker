@@ -1,0 +1,15 @@
+services:
+  caddy:
+    volumes:
+      - type: bind
+        source: ./infra/caddy/openai-mtls.caddy
+        target: /etc/caddy/policies/openai-mtls.caddy
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.local/openai-connectors-intermediate.pem
+        target: /etc/caddy/openai-connectors-intermediate.pem
+        read_only: true
+        bind:
+          create_host_path: false

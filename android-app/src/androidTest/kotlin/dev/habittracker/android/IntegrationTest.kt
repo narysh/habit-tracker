@@ -13,6 +13,7 @@ import org.junit.Test
 import org.junit.Assert.*
 import org.junit.runner.RunWith
 import java.io.File
+import java.time.Instant
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -23,6 +24,32 @@ class IntegrationTest {
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@device.test","test-password-123"))
         app.preferences.save(session,TestServer.url)
         return session
+    }
+    @Test fun automaticDiscoveryCannotMoveManualSessionOrRestoreSignedOutSession() {
+        val session=Session("synthetic-token",UUID.randomUUID().toString(),"synthetic@device.test",Instant.now().plusSeconds(3600).toString())
+        val manual="https://self-hosted.example"
+        val verified="https://verified.example"
+        app.preferences.save(session,manual,automatic=false)
+        try {
+            try { app.preferences.automatic(true,verified); fail("Automatic discovery must not take a session from another server") }
+            catch(_: IllegalArgumentException) { }
+            app.preferences.followDiscoveredServer(session,manual,verified)
+            assertEquals(manual,app.preferences.url())
+            assertNull(app.preferences.tokenFor(session.userId,verified))
+
+            app.preferences.automatic(true,manual)
+            val key=app.preferences.storageKey()
+            app.preferences.followDiscoveredServer(session,manual,verified)
+            assertEquals(session.token,app.preferences.tokenFor(session.userId,verified))
+            assertEquals(key,app.preferences.storageKey())
+
+            app.preferences.clear()
+            app.preferences.followDiscoveredServer(session,verified,manual)
+            assertNull(app.preferences.current())
+        } finally {
+            app.preferences.clear()
+            app.preferences.automatic(false)
+        }
     }
     @Test fun offlinePersistenceSyncConflictFilesAndAccountIsolation()=runBlocking(Dispatchers.IO) {
         val session=account(); var repo=Repository(app,session,false)
@@ -76,6 +103,34 @@ class IntegrationTest {
             scenario.recreate()
             compose.waitUntil(15000) { compose.onAllNodesWithText("Задача из Compose").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Задача из Compose").assertIsDisplayed()
+        }
+    }
+    @Test fun accountDeletionRequiresConfirmationAndRemovesAccountData() {
+        val session=runBlocking(Dispatchers.IO) {
+            val created=account()
+            val repository=app.repository()!!
+            repository.save(TaskContent("Запись перед удалением"),UUID.randomUUID().toString())
+            repository.synchronize()
+            created
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Настройки").performClick()
+            compose.onNodeWithText("Удалить аккаунт и все данные").performScrollTo().performClick()
+            compose.onNodeWithText("Удалить аккаунт безвозвратно?").assertIsDisplayed()
+            compose.onNodeWithText("Отмена").performClick()
+            assertEquals(session.userId,app.preferences.current()?.userId)
+            compose.onNodeWithContentDescription("Настройки").performClick()
+            compose.onNodeWithText("Удалить аккаунт и все данные").performScrollTo().performClick()
+            compose.onNodeWithText("Удалить аккаунт безвозвратно?").assertIsDisplayed()
+            compose.onNodeWithText("Удалить аккаунт и данные").performClick()
+            compose.waitUntil(15000) { app.preferences.current()==null }
+            compose.onNodeWithText("Войди, чтобы синхронизировать данные").assertIsDisplayed()
+        }
+        runBlocking(Dispatchers.IO) {
+            assertEquals(401,try { Api(TestServer.url){session.token}.get<List<Item>>("/api/v1/items"); 200 } catch(e: NetworkFailure) { e.status })
+            assertNull(app.repository())
+            assertFalse(File(app.getDatabasePath("tracker-${session.userId}-${TestServer.url.hashCode().toUInt().toString(16)}.db").path).exists())
         }
     }
     @Test fun reconnectKeepsOfflineQueueFilesAndRejectsAnotherAccount()=runBlocking(Dispatchers.IO) {
