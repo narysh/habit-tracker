@@ -1,7 +1,6 @@
 name: Check
 on:
   push:
-    branches: [master]
   pull_request:
 permissions:
   contents: read
@@ -41,3 +40,15 @@ jobs:
         with:
           name: habit-tracker-debug
           path: android-app/build/outputs/apk/debug/*.apk
+  chatgpt-sites-pilot:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sites-pilot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test
+      - run: npm run build
