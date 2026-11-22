@@ -1,48 +1,11 @@
 const upstreamUrl = "https://habit-tracker-plugin-pilot.onrender.com/mcp";
 const version = "2026-07-28";
 const serverInfo = { name: "habit-tracker-sites-pilot", version: "0.1.0" };
-const operationId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const datePattern = "^\\d{4}-\\d{2}-\\d{2}$";
-const timePattern = "^(?:[01]\\d|2[0-3]):[0-5]\\d$";
-const commonProperties = {
-    operation_id: { type: "string", format: "uuid", description: "Один UUID на одну запись. При повторе используй тот же UUID." },
-    title: { type: "string", minLength: 1, maxLength: 300 },
-};
-const annotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
-
-const tools = [
-    {
-        name: "create_task",
-        description: "Создать задачу в тестовом Habit Tracker по явной просьбе пользователя. Указывай срок, только если пользователь его назвал. Не подтверждай сохранение до успеха инструмента.",
-        annotations,
-        inputSchema: {
-            type: "object",
-            properties: {
-                ...commonProperties,
-                description: { type: "string", maxLength: 4000 },
-                due_date: { type: "string", pattern: datePattern },
-                due_time: { type: "string", pattern: timePattern },
-                zone_id: { type: "string", maxLength: 100, description: "Часовой пояс IANA, если известен." },
-            },
-            required: ["operation_id", "title"],
-            additionalProperties: false,
-        },
-    },
-    {
-        name: "create_note",
-        description: "Сохранить текстовую заметку в тестовом Habit Tracker по явной просьбе пользователя. Сохраняй текст заметки, не добавляй вложения. Не подтверждай сохранение до успеха инструмента.",
-        annotations,
-        inputSchema: {
-            type: "object",
-            properties: {
-                ...commonProperties,
-                text: { type: "string", maxLength: 16000 },
-            },
-            required: ["operation_id", "title", "text"],
-            additionalProperties: false,
-        },
-    },
-];
+const allowedTools = new Set([
+    "get_tasks", "get_notes", "get_habits", "get_habit_history", "get_projects", "search_records", "get_week_review",
+    "create_task", "create_habit", "create_note", "create_project", "propose_week_plan",
+    "update_item", "complete_task", "mark_habit", "delete_item", "get_attachment",
+]);
 
 const responseHeaders = {
     "Cache-Control": "no-store",
@@ -79,15 +42,6 @@ function isObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeArguments(tool, args) {
-    if (!isObject(args)) return null;
-    const { properties, required } = tool.inputSchema;
-    // Some MCP clients serialize omitted optional arguments as JSON null. Treat
-    // those exactly like omitted fields; required nulls still fail validation.
-    return Object.fromEntries(Object.entries(args).filter(([key, value]) =>
-        value !== null || required.includes(key) || !Object.hasOwn(properties, key)));
-}
-
 async function* decodeBody(body, limit) {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const reader = body?.getReader();
@@ -116,28 +70,15 @@ async function readText(body, limit) {
     return text;
 }
 
-function validArguments(tool, args) {
-    const { properties, required } = tool.inputSchema;
-    if (!isObject(args) || !required.every(key => Object.hasOwn(args, key))) return false;
-    if (!Object.entries(args).every(([key, value]) => {
-        if (!Object.hasOwn(properties, key) || typeof value !== "string") return false;
-        const rules = properties[key];
-        return (rules.maxLength === undefined || value.length <= rules.maxLength)
-            && (rules.pattern === undefined || new RegExp(rules.pattern).test(value));
-    })) return false;
-    return operationId.test(args.operation_id) && args.title.trim().length > 0
-        && (!Object.hasOwn(args, "due_time") || Object.hasOwn(args, "due_date"));
-}
-
-async function upstreamReply(response, id) {
+async function upstreamReply(response, id, limit = 12 * 1024 * 1024) {
     const contentType = response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase();
     if (contentType === "application/json") {
-        return JSON.parse(await readText(response.body, 196608));
+        return JSON.parse(await readText(response.body, limit));
     }
     if (contentType !== "text/event-stream") throw new Error();
     let pending = "";
     let data = [];
-    for await (const chunk of decodeBody(response.body, 196608)) {
+    for await (const chunk of decodeBody(response.body, limit)) {
         const lines = (pending + chunk).split("\n");
         pending = lines.pop();
         for (const entry of lines) {
@@ -153,7 +94,7 @@ async function upstreamReply(response, id) {
     throw new Error();
 }
 
-async function createRecord(tool, args, token) {
+async function callUpstream(method, params, token) {
     const id = crypto.randomUUID();
     const response = await fetch(upstreamUrl, {
         method: "POST",
@@ -165,30 +106,39 @@ async function createRecord(tool, args, token) {
             "MCP-Protocol-Version": "2025-11-25",
         },
         body: JSON.stringify({
-            jsonrpc: "2.0", id, method: "tools/call",
-            params: { name: tool.name, arguments: args },
+            jsonrpc: "2.0", id, method, ...(params && { params }),
         }),
         signal: AbortSignal.timeout(65000),
     });
     if (!response.ok) {
         void response.body?.cancel().catch(() => {});
-        return response.status === 401 || response.status === 403 ? "authorization" : "unknown";
+        return { failure: response.status === 401 || response.status === 403 ? "authorization" : "unknown" };
     }
     const message = await upstreamReply(response, id);
-    if (message.jsonrpc !== "2.0" || message.id !== id || !isObject(message.result)) return "unknown";
-    if (message.result.isError) return "rejected";
-    const block = message.result.content?.[0];
-    if (block?.type !== "text" || typeof block.text !== "string") return "unknown";
-    return JSON.parse(block.text).status === "APPLIED" ? "saved" : "rejected";
+    if (message.jsonrpc !== "2.0" || message.id !== id || (!isObject(message.result) && !isObject(message.error))) return { failure: "unknown" };
+    if (message.error) return { failure: "rejected" };
+    return { result: message.result };
 }
 
 const outcomes = {
-    saved: "Запись сохранена в тестовом Habit Tracker.",
     authorization: "Тестовое подключение истекло или было отозвано. Нужен новый OAuth-доступ.",
-    rejected: "Habit Tracker отклонил запись. Проверь поля и срок задачи.",
     unknown: "Сохранение не подтверждено. Если повторишь запрос, используй тот же operation_id.",
     unconfigured: "Тестовое подключение Habit Tracker ещё не настроено.",
 };
+
+async function configuredToken(user, env) {
+    const token = env.HABIT_TRACKER_MCP_ACCESS_TOKEN;
+    return user === env.HABIT_TRACKER_SITE_OWNER_ID && typeof token === "string"
+        && /^[A-Za-z0-9_-]{32,256}$/.test(token) ? token : undefined;
+}
+
+async function scopedTools(token) {
+    const upstream = await callUpstream("tools/list", undefined, token);
+    if (!upstream.result) return upstream;
+    const tools = upstream.result.tools;
+    if (!Array.isArray(tools)) return { failure: "unknown" };
+    return { result: { ...upstream.result, tools: tools.filter(tool => allowedTools.has(tool.name)) } };
+}
 
 export default {
     async fetch(request, env) {
@@ -249,36 +199,42 @@ export default {
             return error(rpc.id, -32022, "Unsupported MCP protocol version", 400,
                 { supported: [version], requested });
         }
-        if (rpc.method === "tools/list") return complete(rpc.id, { tools });
-        if (rpc.method !== "tools/call") return error(rpc.id, -32601, "Method not found");
-        const tool = tools.find(candidate => candidate.name === rpc.params?.name);
-        if (!tool) return error(rpc.id, -32602, "Unknown tool");
-        const args = normalizeArguments(tool, rpc.params?.arguments);
-        if (!validArguments(tool, args)) {
-            return complete(rpc.id, {
-                content: [{ type: "text", text: "Проверь обязательные поля и формат аргументов." }],
-                isError: true,
-            });
-        }
-
-        let outcome = "unconfigured";
-        const token = env.HABIT_TRACKER_MCP_ACCESS_TOKEN;
-        if (user === env.HABIT_TRACKER_SITE_OWNER_ID && typeof token === "string"
-            && /^[A-Za-z0-9_-]{32,256}$/.test(token)) {
+        const token = await configuredToken(user, env);
+        if (rpc.method === "tools/list") {
+            if (!token) return complete(rpc.id, { tools: [] });
             try {
-                outcome = await createRecord(tool, args, token);
+                const upstream = await scopedTools(token);
+                return upstream.result
+                    ? complete(rpc.id, upstream.result)
+                    : complete(rpc.id, { tools: [] });
             } catch {
-                outcome = "unknown";
+                return complete(rpc.id, { tools: [] });
             }
         }
-        return complete(rpc.id, {
-            content: [{ type: "text", text: outcomes[outcome] }],
-            // Expected connection/business failures are actionable results, not
-            // invalid tool arguments. Some hosts otherwise replace the useful
-            // message with a generic INVALID_ARGUMENT error. The tool description
-            // still requires the assistant to verify the returned text before
-            // claiming a write succeeded.
-            isError: false,
-        });
+        if (rpc.method !== "tools/call") return error(rpc.id, -32601, "Method not found");
+        if (typeof rpc.params?.name !== "string" || !allowedTools.has(rpc.params.name)) {
+            return error(rpc.id, -32602, "Unknown tool");
+        }
+        if (!token) return complete(rpc.id, { content: [{ type: "text", text: outcomes.unconfigured }], isError: false });
+        try {
+            const catalog = await scopedTools(token);
+            if (!catalog.result?.tools.some(tool => tool.name === rpc.params.name)) {
+                return error(rpc.id, -32602, "Tool is not available for this OAuth permission");
+            }
+            const upstream = await callUpstream("tools/call", {
+                name: rpc.params.name,
+                arguments: isObject(rpc.params.arguments) ? rpc.params.arguments : {},
+            }, token);
+            if (upstream.result) return complete(rpc.id, upstream.result);
+            return complete(rpc.id, {
+                content: [{ type: "text", text: outcomes[upstream.failure] ?? outcomes.unknown }],
+                isError: false,
+            });
+        } catch {
+            return complete(rpc.id, {
+                content: [{ type: "text", text: outcomes.unknown }],
+                isError: false,
+            });
+        }
     },
 };
