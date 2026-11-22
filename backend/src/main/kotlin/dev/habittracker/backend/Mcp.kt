@@ -15,7 +15,7 @@ import java.util.UUID
 
 fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
     val server = Server(Implementation("habit-tracker","0.4.0"),ServerOptions(capabilities=ServerCapabilities(tools=ServerCapabilities.Tools(listChanged=false))))
-    val publicTools = setOf("get_tasks", "create_task", "complete_task")
+    val publicTools = setOf("get_tasks", "create_task", "complete_task", "create_note")
     fun add(name: String, description: String, fields: Map<String,String> = emptyMap(), required: List<String> = fields.keys.toList(), read: Boolean = false, destructive: Boolean = false, action: (JsonObject) -> JsonElement) {
         if (settings.publicPlugin && name !in publicTools) return
         server.addTool(name=name,description=description,inputSchema=ToolSchema(properties=buildJsonObject {
@@ -51,7 +51,10 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
         mapOf("operation_id" to "string","title" to "string","description" to "string","due_date" to "string","due_time" to "string","zone_id" to "string","reminder_minutes" to "integer"),listOf("operation_id","title")) { args ->
         create(args,TaskContent(args.str("title"),args.optional("description") ?: "",args.optional("due_date"),args.optional("due_time"),args.optional("zone_id") ?: "Europe/Moscow",args["reminder_minutes"]?.jsonPrimitive?.int))
     }
-    add("create_note","Создать текстовую заметку. Не добавляй файлы без отдельной просьбы.",mapOf("operation_id" to "string","title" to "string","text" to "string"),listOf("operation_id","title","text")) { args -> create(args,NoteContent(args.str("title"),args.str("text"))) }
+    add("create_note", "Сохранить текстовую заметку по явной просьбе пользователя. Передай заголовок и текст. operation_id — UUID, сохраняй при повторе. Инструмент принимает только текст.",
+        mapOf("operation_id" to "string", "title" to "string", "text" to "string")) { args ->
+        create(args, NoteContent(args.str("title"), args.str("text")))
+    }
     add("create_habit","Создать привычку. mode WEEKDAYS: weekdays — номера дней 1 (понедельник)..7; mode WEEKLY_TARGET: target_per_week 1..7 разных дней. starts_on YYYY-MM-DD и zone_id обязательны; при неоднозначности спроси пользователя. reminder_time HH:mm необязательно.",
         mapOf("operation_id" to "string","title" to "string","description" to "string","mode" to "string","weekdays" to "array","target_per_week" to "integer","starts_on" to "string","zone_id" to "string","reminder_time" to "string"),
         listOf("operation_id","title","mode","starts_on","zone_id")) { args ->

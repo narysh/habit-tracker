@@ -25,6 +25,19 @@ import java.util.UUID
 
 private val identityKey = AttributeKey<Identity>("identity")
 private val tokenKey = AttributeKey<String>("token")
+private fun ApplicationCall.rateLimitHost(settings: Settings): String {
+    val peer = request.local.remoteHost
+    if (!settings.trustReverseProxy) return peer
+    val realIp = request.headers.getAll("X-Real-IP")?.singleOrNull() ?: return peer
+    if (realIp.length > 45) return peer
+    if (':' in realIp && realIp.all { it in "0123456789abcdefABCDEF:." }) {
+        return runCatching { java.net.InetAddress.getByName(realIp).hostAddress }.getOrDefault(peer)
+    }
+    val parts = realIp.split('.')
+    return if (parts.size == 4 && parts.all { it.length in 1..3 && it.all { digit -> digit in '0'..'9' } && it.toInt() <= 255 }) {
+        parts.joinToString(".") { it.toInt().toString() }
+    } else peer
+}
 fun main() {
     val settings = Settings.environment()
     val store = Store(settings.jdbcUrl,settings.dbUser,settings.dbPassword)
@@ -41,6 +54,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
     install(RequestBodyLimit) { bodyLimit { if(it.request.path().startsWith("/api/v1/attachments/")) 20L*1024*1024 else 8L*1024*1024 } }
     install(StatusPages) {
         exception<io.ktor.server.plugins.PayloadTooLargeException> { call,_ -> call.respond(HttpStatusCode.PayloadTooLarge,ApiError("Слишком большой запрос")) }
+        exception<io.ktor.server.plugins.BadRequestException> { call,_ -> call.respond(HttpStatusCode.BadRequest,ApiError("Некорректный запрос")) }
         exception<ApiFailure> { call,e -> call.respond(HttpStatusCode.fromValue(e.status),ApiError(e.message)) }
         exception<IllegalArgumentException> { call,e -> call.respond(HttpStatusCode.BadRequest,ApiError(e.message ?: "Некорректный запрос")) }
         exception<kotlinx.serialization.SerializationException> { call,_ -> call.respond(HttpStatusCode.BadRequest,ApiError("Некорректный JSON")) }
@@ -93,13 +107,19 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             call.respondText("Проверка входа завершена. Вернись в Habit Tracker: результат появится в приложении.",ContentType.Text.Plain)
         }
         get("/health") { call.respond(buildJsonObject { put("status","ok"); put("stage","backend") }) }
+        get("/readyz") {
+            val ready = withContext(Dispatchers.IO) { Files.isWritable(settings.files) && store.databaseAvailable() }
+            call.respond(if (ready) HttpStatusCode.OK else HttpStatusCode.ServiceUnavailable, buildJsonObject {
+                put("status", if (ready) "ok" else "unavailable")
+            })
+        }
         route("/api/v1") {
             get("/auth/social/providers") {
                 val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
                 call.respond(withContext(Dispatchers.IO) { social.providers(store.authenticate(token, appSessionOnly = settings.publicPlugin)) })
             }
             post("/auth/social/start") {
-                throttle.check(call.request.local.remoteHost)
+                throttle.check(call.rateLimitHost(settings))
                 val request=call.receive<SocialStart>()
                 val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
                 call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token, appSessionOnly = settings.publicPlugin),token) })
@@ -109,12 +129,12 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 call.respond(social.poll(request))
             }
             post("/auth/register") {
-                throttle.check(call.request.local.remoteHost)
+                throttle.check(call.rateLimitHost(settings))
                 val credentials = call.receive<Credentials>()
                 call.respond(HttpStatusCode.Created,withContext(Dispatchers.IO) { store.register(credentials) })
             }
             post("/auth/login") {
-                throttle.check(call.request.local.remoteHost)
+                throttle.check(call.rateLimitHost(settings))
                 val credentials = call.receive<Credentials>()
                 call.respond(withContext(Dispatchers.IO) { store.login(credentials) })
             }
@@ -229,7 +249,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             )
         }
         post("/oauth/consent") {
-            throttle.check(call.request.local.remoteHost)
+            throttle.check(call.rateLimitHost(settings))
             val form = call.receiveParameters()
             val allow = form["decision"] == "allow"
             val identity = if(allow) withContext(Dispatchers.IO) { store.checkPassword(Credentials(form["email"].orEmpty(),form["password"].orEmpty())) } ?: throw ApiFailure(401,"Неверный email или пароль") else null

@@ -25,6 +25,33 @@ class HttpIntegrationTest {
     }
     @AfterAll fun stop() { if(::store.isInitialized) store.close(); if(::pg.isInitialized) pg.close() }
     private fun user()=store.register(Credentials("${UUID.randomUUID()}@http.test","test-password-123"))
+    @Test fun `readiness detects unavailable database without leaking error details`() {
+        val independentStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
+        independentStore.use {
+            testApplication {
+                application { backendModule(settings,independentStore) }
+                assertEquals(HttpStatusCode.OK,client.get("/readyz").status)
+                independentStore.close()
+                val unavailable=client.get("/readyz")
+                assertEquals(HttpStatusCode.ServiceUnavailable,unavailable.status)
+                assertEquals(buildJsonObject { put("status","unavailable") },WireJson.parseToJsonElement(unavailable.bodyAsText()))
+                assertEquals(HttpStatusCode.OK,client.get("/health").status)
+            }
+        }
+    }
+    @Test fun `only explicit proxy mode accepts its client IP for throttling`() {
+        for (trusted in listOf(false,true)) testApplication {
+            application { backendModule(settings.copy(trustReverseProxy=trusted),store) }
+            repeat(21) { index ->
+                val response=client.post("/api/v1/auth/login") {
+                    header("X-Real-IP", "192.0.2.${index+1}")
+                    contentType(ContentType.Application.Json)
+                    setBody("{}")
+                }
+                assertEquals(if (!trusted && index==20) HttpStatusCode.TooManyRequests else HttpStatusCode.BadRequest,response.status)
+            }
+        }
+    }
     @Test fun `REST denies anonymous users and isolates attachments`()=testApplication {
         application { backendModule(settings,store) }
         assertEquals(HttpStatusCode.Unauthorized,client.get("/api/v1/items").status)
@@ -103,7 +130,7 @@ class HttpIntegrationTest {
         assertTrue(WireJson.parseToJsonElement(rpc.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
         assertTrue(store.list(account.userId).isEmpty())
     }
-    @Test fun `public plugin accepts only its own OAuth grant and syncs a task to the same Android account`() = testApplication {
+    @Test fun `public plugin accepts only its own OAuth grant and syncs tasks and notes to the same Android account`() = testApplication {
         val plugin = settings.copy(
             publicUrl = "https://tracker.example.test",
             clientId = "habit-tracker-chatgpt",
@@ -176,11 +203,34 @@ class HttpIntegrationTest {
         val catalog = rpc(allowed.accessToken, listRequest)
         assertEquals(HttpStatusCode.OK, catalog.status, catalog.bodyAsText())
         val tools = WireJson.parseToJsonElement(catalog.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("tools").jsonArray
-        assertEquals(setOf("create_task", "get_tasks", "complete_task"), tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
+        assertEquals(setOf("create_task", "get_tasks", "complete_task", "create_note"), tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
         assertEquals(HttpStatusCode.Unauthorized, client.get("/api/v1/items") { bearerAuth(allowed.accessToken) }.status)
         val create = rpc(allowed.accessToken, """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_task","arguments":{"operation_id":"${UUID.randomUUID()}","title":"С телефона"}}}""")
         assertEquals(HttpStatusCode.OK, create.status, create.bodyAsText())
         assertFalse(WireJson.parseToJsonElement(create.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
+        val noteArguments = buildJsonObject {
+            put("operation_id", UUID.randomUUID().toString())
+            put("title", "Заметка с телефона")
+            put("text", "Строка 1\nСтрока 2")
+        }
+        val noteRequest = buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("id", 3)
+            put("method", "tools/call")
+            putJsonObject("params") {
+                put("name", "create_note")
+                put("arguments", noteArguments)
+            }
+        }.toString()
+        val readOnly = store.issueOAuth(identity.copy(scopes = setOf("tracker:read")), plugin.clientId, plugin.resource)
+        val rejectedNote = rpc(readOnly.accessToken, noteRequest)
+        assertEquals(HttpStatusCode.OK, rejectedNote.status, rejectedNote.bodyAsText())
+        assertTrue(WireJson.parseToJsonElement(rejectedNote.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
+        repeat(2) {
+            val note = rpc(allowed.accessToken, noteRequest)
+            assertEquals(HttpStatusCode.OK, note.status, note.bodyAsText())
+            assertFalse(WireJson.parseToJsonElement(note.bodyAsText()).jsonObject.getValue("result").jsonObject.getValue("isError").jsonPrimitive.boolean)
+        }
         suspend fun sync(token: String) = client.post("/api/v1/sync") {
             bearerAuth(token)
             contentType(ContentType.Application.Json)
@@ -189,7 +239,10 @@ class HttpIntegrationTest {
             assertEquals(HttpStatusCode.OK, response.status, response.bodyAsText())
             WireJson.decodeFromString<SyncResponse>(response.bodyAsText())
         }
-        assertEquals("С телефона", sync(owner.token).changes.single().content.title)
+        val synced = sync(owner.token).changes
+        assertEquals(2, synced.size)
+        assertEquals("С телефона", synced.map { it.content }.filterIsInstance<TaskContent>().single().title)
+        assertEquals(NoteContent("Заметка с телефона", "Строка 1\nСтрока 2"), synced.map { it.content }.filterIsInstance<NoteContent>().single())
         assertTrue(sync(other.token).changes.isEmpty())
 
         suspend fun checkConnection(token: String): ChatGptConnection {
@@ -216,6 +269,6 @@ class HttpIntegrationTest {
         assertEquals(HttpStatusCode.Unauthorized, refresh(rotated.refreshToken).status)
         assertEquals(HttpStatusCode.OK, rpc(otherGrant.accessToken, listRequest).status)
         assertNotNull(store.authenticate(wrongClient.accessToken))
-        assertEquals("С телефона", sync(owner.token).changes.single().content.title)
+        assertEquals(synced, sync(owner.token).changes)
     }
 }

@@ -20,6 +20,11 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         maximumPoolSize = 8; connectionTimeout = 10000
     })
     init { Flyway.configure().dataSource(pool).load().migrate() }
+    fun databaseAvailable(): Boolean = try {
+        pool.connection.use { it.isValid(2) }
+    } catch (_: java.sql.SQLException) {
+        false
+    }
     private fun <T> tx(block: (Connection) -> T): T = pool.connection.use { c ->
         c.autoCommit = false
         try { val result = block(c); c.commit(); result } catch (e: Throwable) { c.rollback(); throw e }

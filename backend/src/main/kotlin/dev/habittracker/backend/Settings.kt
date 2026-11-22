@@ -16,6 +16,7 @@ data class Settings(
     val port: Int = 8081,
     val publicPlugin: Boolean = false,
     val openAiDomainChallenge: String? = null,
+    val trustReverseProxy: Boolean = false,
 ) {
     val resource get() = "$publicUrl/mcp"
     init {
@@ -52,6 +53,7 @@ data class Settings(
                 port = env["PORT"]?.toInt() ?: 8081,
                 publicPlugin = env["PUBLIC_CHATGPT_PLUGIN"]?.toBooleanStrict() ?: false,
                 openAiDomainChallenge = env["OPENAI_APPS_CHALLENGE"]?.takeIf(String::isNotEmpty),
+                trustReverseProxy = env["TRUST_REVERSE_PROXY"]?.toBooleanStrict() ?: false,
             )
         }
 

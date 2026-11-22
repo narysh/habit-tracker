@@ -142,30 +142,38 @@ def smoke(server, client_id, secret, callback, challenge):
                                                             "clientInfo": {"name": "habit-tracker-smoke", "version": "1"}})
         require("tools" in initialization.get("capabilities", {}), "MCP initialization did not advertise tools")
         catalog = server.rpc(access, "tools/list")
-        require({tool["name"] for tool in catalog["tools"]} == {"create_task", "get_tasks", "complete_task"}, "Unexpected tool catalog")
+        require({tool["name"] for tool in catalog["tools"]} == {"create_task", "get_tasks", "complete_task", "create_note"}, "Unexpected tool catalog")
         task = {"operation_id": str(uuid.uuid4()), "title": "HTTPS plugin smoke test"}
+        note = {"operation_id": str(uuid.uuid4()), "title": "HTTPS note smoke test", "text": "First line\nSecond line"}
         for _ in range(2):
-            result = server.rpc(access, "tools/call", {"name": "create_task", "arguments": task})
-            require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "Task creation did not apply")
+            for tool_name, arguments in (("create_task", task), ("create_note", note)):
+                result = server.rpc(access, "tools/call", {"name": tool_name, "arguments": arguments})
+                require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", f"{tool_name} did not apply")
         sync = {"operations": [], "cursor": 0}
         owner_items = server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]
-        require(len(owner_items) == 1 and owner_items[0]["content"]["title"] == task["title"], "Task missing or duplicated in Android sync")
-        require(not server.data("/api/v1/sync", token=other, json_body=sync)["changes"], "Task leaked to a different account")
+        require(len(owner_items) == 2, "Task or note missing or duplicated in Android sync")
+        items_by_kind = {item["content"]["kind"]: item for item in owner_items}
+        require(set(items_by_kind) == {"task", "note"}, "Android sync did not return one task and one note")
+        task_item = items_by_kind["task"]
+        note_content = items_by_kind["note"]["content"]
+        require(task_item["content"]["title"] == task["title"], "Task title changed during sync")
+        require(note_content["title"] == note["title"] and note_content["text"] == note["text"], "Note title or text changed during sync")
+        require(not server.data("/api/v1/sync", token=other, json_body=sync)["changes"], "Task or note leaked to a different account")
         listing = server.rpc(access, "tools/call", {"name": "get_tasks", "arguments": {}})
-        require(json.loads(listing["content"][0]["text"])[0]["id"] == owner_items[0]["id"], "MCP listing omitted the task")
-        completion = {"operation_id": str(uuid.uuid4()), "id": owner_items[0]["id"],
-                      "expected_version": owner_items[0]["version"], "completed": True}
+        require([item["id"] for item in json.loads(listing["content"][0]["text"])] == [task_item["id"]], "MCP listing omitted the task or exposed the note")
+        completion = {"operation_id": str(uuid.uuid4()), "id": task_item["id"],
+                      "expected_version": task_item["version"], "completed": True}
         result = server.rpc(access, "tools/call", {"name": "complete_task", "arguments": completion})
         require(json.loads(result["content"][0]["text"])["status"] == "APPLIED", "Task completion did not apply")
         updated = server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]
-        require(len(updated) == 1 and updated[0]["content"]["completed"], "Task completion missing from Android sync")
-        print("PASS task creation, listing, completion, idempotency and isolated Android sync", flush=True)
+        require(any(item["id"] == task_item["id"] and item["content"]["completed"] for item in updated), "Task completion missing from Android sync")
+        print("PASS task creation, listing, completion, note creation, idempotency and isolated Android sync", flush=True)
 
         server.request("/api/v1/account/chatgpt", method="DELETE", token=owner, expect=204)
         server.request("/mcp", token=access, json_body=basic_rpc, expect=401)
         server.request("/oauth/token", form={**token_params, "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}, expect=401)
         require(not server.data("/api/v1/account/chatgpt", token=owner)["connected"], "Account still shows connected")
-        require(len(server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]) == 1, "Android session no longer works")
+        require(len(server.data("/api/v1/sync", token=owner, json_body=sync)["changes"]) == 2, "Android session no longer works")
         print("PASS revocation of MCP access while Android keeps working", flush=True)
     finally:
         for token in sessions:

@@ -29,17 +29,17 @@ function ReviewCase($prompt, $tools, $expected) {
 $manifest = @{
     '$schema' = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json'
     name = 'habit-tracker'; version = $Version
-    description = 'Create, list and complete tasks in your connected Habit Tracker account.'
+    description = 'Create, list and complete tasks, and save text notes in your connected Habit Tracker account.'
     author = @{ name = $DeveloperName }
     repository = 'https://github.com/narysh/habit-tracker'
     extensions = @{ 'com.openai' = @{
         interface = @{
-            displayName = 'Habit Tracker'; shortDescription = 'Tasks for your Android app'
-            longDescription = 'Create, view and complete tasks in your Habit Tracker account. The Android app syncs the same tasks when it is online.'
+            displayName = 'Habit Tracker'; shortDescription = 'Tasks and notes for your Android app'
+            longDescription = 'Create, view and complete tasks and save text notes in your Habit Tracker account. The Android app syncs these records when it is online.'
             developerName = $DeveloperName; category = 'Productivity'; logo = './icon.png'; composerIcon = './icon.png'
             websiteURL = $Website.AbsoluteUri; supportURL = $Support.AbsoluteUri
             privacyPolicyURL = $PrivacyPolicy.AbsoluteUri; termsOfServiceURL = $Terms.AbsoluteUri
-            defaultPrompt = @('Show my Habit Tracker tasks', 'Add a task to pay for internet')
+            defaultPrompt = @('Show my Habit Tracker tasks', 'Add a task to pay for internet', 'Save a note titled Trip with the text Bring the passport')
         }
         review = @{ test_cases = @{
             positive = @(
@@ -48,11 +48,13 @@ $manifest = @{
                 (ReviewCase 'List my Habit Tracker tasks.' 'get_tasks' 'Shows the tasks from the connected account.')
                 (ReviewCase 'What unfinished tasks are in my Habit Tracker?' 'get_tasks' 'Reports unfinished tasks only.')
                 (ReviewCase 'Mark my Habit Tracker task Buy milk complete.' 'get_tasks, complete_task' 'Only the selected existing task is marked complete.')
+                (ReviewCase 'Save a Habit Tracker note titled Trip with the text Bring the passport.' 'create_note' 'One note with the requested title and text appears in the connected account.')
             )
             negative = @(
                 (ReviewCase 'What is the capital of Spain?' '' 'Answers without calling Habit Tracker.')
                 (ReviewCase 'Delete all my Habit Tracker tasks.' '' 'Explains deletion is unavailable and deletes nothing.')
                 (ReviewCase 'Create a task in another Habit Tracker account using someone@example.test.' '' 'Explains it can act only in the connected account and creates nothing.')
+                (ReviewCase 'Read my existing Habit Tracker notes.' '' 'Explains reading existing notes is unavailable and reveals no notes.')
             )
         } }
     } }
