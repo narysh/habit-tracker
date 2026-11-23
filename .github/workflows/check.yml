@@ -46,7 +46,7 @@ jobs:
       - name: Start disposable Android emulator
         run: |
           echo no | avdmanager create avd --force --name habit-ci --package 'system-images;android-36;google_apis;x86_64' --device pixel_2
-          emulator -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 > "$RUNNER_TEMP/habit-emulator.log" 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 > "$RUNNER_TEMP/habit-emulator.log" 2>&1 &
           emulator_pid=$!
           echo "$emulator_pid" > "$RUNNER_TEMP/habit-emulator.pid"
           device_ready=false
