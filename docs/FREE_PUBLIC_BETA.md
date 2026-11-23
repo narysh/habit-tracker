@@ -31,7 +31,11 @@ pwsh -File .\scripts\New-HostedConnectionKeys.ps1
 4. До создания проверь, что Blueprint создаёт только один Web Service с планом Free. В этом файле нет Render PostgreSQL, платных инстансов и автодеплоя.
 5. Создай Blueprint. На запрос значений укажи `DATABASE_URL`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` и оба ключа подписи из локального файла.
 
+Если включаешь вход через Google или Яндекс, в той же форме укажи `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `YANDEX_CLIENT_ID` и `YANDEX_CLIENT_SECRET`. Это секреты backend: используй значения из локального `.local/social.env`, не добавляй их в GitHub и не вставляй в этот документ. `SOCIAL_CALLBACK_BASE` уже задан публичным адресом GitHub Pages. Провайдер без настроенного client ID останется отключён. `VK_CLIENT_ID` добавляй после регистрации VK ID-приложения; его сейчас нет.
+
 Остальные настройки задаются файлом: включён публичный MCP, `MCP_CLIENT_SECRET` генерирует Render, OAuth callback — `https://chatgpt.com/connector_platform_oauth_redirect`, а Android URL приложение берёт из выданного Render адреса. Секреты будут доступны только серверу.
+
+Для уже существующего Render-сервиса `sync: false` значения из Blueprint автоматически не устанавливаются: добавь их через **Environment** вручную, если соцвход ещё не настроен.
 
 ## 4. Проверь запуск до подключения ChatGPT
 

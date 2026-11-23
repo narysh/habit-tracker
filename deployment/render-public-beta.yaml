@@ -23,6 +23,18 @@ services:
         generateValue: true
       - key: MCP_REDIRECT_URIS
         value: https://chatgpt.com/connector_platform_oauth_redirect
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: VK_CLIENT_ID
+        sync: false
+      - key: YANDEX_CLIENT_ID
+        sync: false
+      - key: YANDEX_CLIENT_SECRET
+        sync: false
+      - key: SOCIAL_CALLBACK_BASE
+        value: https://narysh.github.io/habit-tracker
       - key: DATABASE_URL
         sync: false
       - key: S3_ENDPOINT
