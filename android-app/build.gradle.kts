@@ -24,6 +24,18 @@ if (hasReleaseSigning) {
     require(releaseSigning.values.all { it != null }) { "Set all four HABIT_TRACKER_SIGNING_* variables for release signing" }
     require(backendOrigin.isNotEmpty()) { "Set -PhabitTrackerOrigin to the release HTTPS backend before signing" }
 }
+val releaseArtifactRequested = gradle.startParameter.taskNames.any { task ->
+    task.substringAfterLast(':').matches(Regex("(assemble|bundle|install|package|publish)Release", RegexOption.IGNORE_CASE))
+}
+if (releaseArtifactRequested) {
+    require(backendOrigin.isNotEmpty()) { "A release artifact requires -PhabitTrackerOrigin with the stable production HTTPS origin" }
+    val originHost = URI(backendOrigin).host.lowercase()
+    val temporaryTunnel = listOf("lhr.life", "trycloudflare.com", "localhost.run").any { domain ->
+        originHost == domain || originHost.endsWith(".$domain")
+    }
+    require(!temporaryTunnel) { "A release artifact cannot use a temporary tunnel as its backend origin" }
+    require(hasReleaseSigning) { "A release artifact requires the persistent HABIT_TRACKER_SIGNING_* key" }
+}
 
 android {
     namespace = "dev.habittracker.android"

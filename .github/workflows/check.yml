@@ -49,6 +49,27 @@ jobs:
           packages: 'platform-tools emulator'
       - run: sdkmanager 'platforms;android-36.1' 'build-tools;36.0.0' 'system-images;android-36;google_apis;x86_64'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Verify release builds require a stable server and signing key
+        shell: bash
+        run: |
+          set +e
+          no_origin=$(bash gradlew :android-app:assembleRelease --no-daemon 2>&1)
+          no_origin_status=$?
+          set -e
+          if [ "$no_origin_status" -eq 0 ] || ! grep -Fq 'A release artifact requires -PhabitTrackerOrigin with the stable production HTTPS origin' <<< "$no_origin"; then
+            printf '%s\n' "$no_origin"
+            echo 'Release build did not reject a missing backend origin.'
+            exit 1
+          fi
+          set +e
+          no_signing=$(bash gradlew :android-app:assembleRelease --no-daemon -PhabitTrackerOrigin=https://tracker.example.org 2>&1)
+          no_signing_status=$?
+          set -e
+          if [ "$no_signing_status" -eq 0 ] || ! grep -Fq 'A release artifact requires the persistent HABIT_TRACKER_SIGNING_* key' <<< "$no_signing"; then
+            printf '%s\n' "$no_signing"
+            echo 'Release build did not reject a missing signing key.'
+            exit 1
+          fi
       - run: bash gradlew :android-app:assembleDebug :android-app:lintDebug
       - name: Start disposable Android emulator
         run: |
