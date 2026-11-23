@@ -31,6 +31,7 @@ jobs:
             mcp-probe/build/reports/tests/test
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -46,14 +47,15 @@ jobs:
       - name: Start disposable Android emulator
         run: |
           export ANDROID_AVD_HOME="$RUNNER_TEMP/habit-avd"
+          export ANDROID_I_WANT_MY_TCG=yes
           mkdir -p "$ANDROID_AVD_HOME"
           echo no | avdmanager create avd --force --name habit-ci --package 'system-images;android-36;google_apis;x86_64' --device pixel_2
           "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fx habit-ci
-          "$ANDROID_HOME/emulator/emulator" -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 > "$RUNNER_TEMP/habit-emulator.log" 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd habit-ci -accel off -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 > "$RUNNER_TEMP/habit-emulator.log" 2>&1 &
           emulator_pid=$!
           echo "$emulator_pid" > "$RUNNER_TEMP/habit-emulator.pid"
           device_ready=false
-          for attempt in $(seq 1 90); do
+          for attempt in $(seq 1 150); do
             if ! kill -0 "$emulator_pid" 2>/dev/null; then
               cat "$RUNNER_TEMP/habit-emulator.log"
               exit 1
@@ -63,11 +65,11 @@ jobs:
           done
           if [ "$device_ready" != true ]; then
             cat "$RUNNER_TEMP/habit-emulator.log"
-            echo 'Android emulator did not appear in adb within 180 seconds.'
+            echo 'Android emulator did not appear in adb within 300 seconds.'
             exit 1
           fi
           boot_completed=false
-          for attempt in $(seq 1 90); do
+          for attempt in $(seq 1 150); do
             if ! kill -0 "$emulator_pid" 2>/dev/null; then
               cat "$RUNNER_TEMP/habit-emulator.log"
               exit 1
@@ -77,7 +79,7 @@ jobs:
           done
           if [ "$boot_completed" != true ]; then
             cat "$RUNNER_TEMP/habit-emulator.log"
-            echo 'Android emulator did not finish booting within 180 seconds.'
+            echo 'Android emulator did not finish booting within 300 seconds.'
             exit 1
           fi
           adb -s emulator-5554 shell settings put global window_animation_scale 0
