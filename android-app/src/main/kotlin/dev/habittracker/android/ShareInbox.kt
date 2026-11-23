@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import dev.habittracker.shared.WireJson
 import dev.habittracker.shared.TaskContent
 import dev.habittracker.shared.NoteContent
+import dev.habittracker.shared.parseQuickTask
 import dev.habittracker.shared.TASK_DRAFT_PAGE
 import dev.habittracker.shared.contentDraftFromLink
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +16,15 @@ import java.util.UUID
 import java.time.ZoneId
 
 @Serializable data class SharedFile(val path: String,val name: String,val mime: String)
-@Serializable data class SharedDraft(val id: String,val title: String,val text: String,val files: List<SharedFile>,val task: TaskContent? = null,val note: NoteContent? = null)
+@Serializable data class SharedDraft(
+    val id: String,
+    val title: String,
+    val text: String,
+    val files: List<SharedFile>,
+    val task: TaskContent? = null,
+    val note: NoteContent? = null,
+    val autoSave: Boolean = false,
+)
 class ShareInbox(private val context: Context) {
     private val directory=File(context.filesDir,"incoming").apply {mkdirs()}
     private val manifest=File(directory,"drafts.json")
@@ -28,7 +37,7 @@ class ShareInbox(private val context: Context) {
         require(drafts.value.size < 10) { "Сначала сохрани или отклони предыдущие черновики" }
         val task = content as? TaskContent
         val note = content as? NoteContent
-        store(drafts.value + SharedDraft(UUID.randomUUID().toString(), content.title, task?.description ?: note?.text.orEmpty(), emptyList(), task, note))
+        store(drafts.value + SharedDraft(UUID.randomUUID().toString(), content.title, task?.description ?: note?.text.orEmpty(), emptyList(), task, note, autoSave = true))
     }
     @Synchronized fun receive(intent: Intent) {
         require(intent.action in setOf(Intent.ACTION_SEND,Intent.ACTION_SEND_MULTIPLE))
@@ -55,9 +64,45 @@ class ShareInbox(private val context: Context) {
                 context.contentResolver.openInputStream(uri)!!.use {input->file.outputStream().use {output->val buffer=ByteArray(8192);var total=0L;while(true){val n=input.read(buffer);if(n<0)break;total+=n;storedBytes+=n;require(total<=20L*1024*1024){"Файл больше 20 МБ"};require(storedBytes<=512L*1024*1024){"Входящие заполнены. Сохрани или отклони предыдущие файлы."};output.write(buffer,0,n)}}}
             }
             require(text.isNotBlank() || copied.isNotEmpty()) {"Нет текста или файлов для сохранения"}
-            val title=subject.ifBlank {text.lineSequence().firstOrNull()?.take(100).orEmpty().ifBlank {copied.firstOrNull()?.name ?: "Из другого приложения"}}
-            store(drafts.value+SharedDraft(UUID.randomUUID().toString(),title,text,copied))
+            val imported = importText(subject, text, copied)
+            store(drafts.value + imported.copy(id = UUID.randomUUID().toString(), files = copied))
         }catch(e: Exception){copied.forEach {File(it.path).delete()};throw e}
     }
+
+    private fun importText(subject: String, text: String, files: List<SharedFile>): SharedDraft {
+        val lines = text.lines()
+        val headerIndex = lines.indexOfFirst { it.isNotBlank() }
+        val header = lines.getOrNull(headerIndex).orEmpty().trim()
+        val taskHeader = Regex("(?i)^(?:[-*•]\\s*)?(?:(?:создай|добавь|поставь|запланируй)\\s+(?:мне\\s+)?)?(?:задача|задачу|task)\\s*[:—-]\\s*(.+)$")
+            .matchEntire(header)
+        if (taskHeader != null && files.isEmpty()) {
+            val zone = ZoneId.systemDefault().id
+            val titleAndDate = taskHeader.groupValues[1].trim()
+            val description = lines.drop(headerIndex + 1).joinToString("\n").trim()
+            val parsed = runCatching { parseQuickTask(titleAndDate, java.time.LocalDate.now(ZoneId.of(zone)), zone) }.getOrNull()
+            val task = parsed?.content?.copy(description = description)
+                ?: TaskContent(titleAndDate, description = description, zoneId = zone)
+            return SharedDraft("", task.title, task.description, emptyList(), task = task, autoSave = parsed?.warnings?.isEmpty() == true)
+        }
+
+        val noteHeader = Regex("(?i)^(?:[-*•]\\s*)?(?:(?:сохрани|создай|добавь|запиши)\\s+(?:мне\\s+)?)?(?:заметка|заметку|note)\\s*[:—-]\\s*(.*)$")
+            .matchEntire(header)
+        if (noteHeader != null) {
+            val firstLine = noteHeader.groupValues[1].trim()
+            val title = subject.takeIf { it.isNotBlank() && !it.equals("ChatGPT", ignoreCase = true) }
+                ?: firstLine.take(100).ifBlank { files.firstOrNull()?.name ?: "Заметка" }
+            val body = lines.drop(headerIndex + 1).joinToString("\n").trim().ifBlank { firstLine }
+            val note = NoteContent(title, body)
+            return SharedDraft("", title, body, emptyList(), note = note, autoSave = true)
+        }
+
+        val title = subject.takeIf { it.isNotBlank() && !it.equals("ChatGPT", ignoreCase = true) }
+            ?: text.lineSequence().firstOrNull()?.trim()?.take(100)?.ifBlank { null }
+            ?: files.firstOrNull()?.name
+            ?: "Из другого приложения"
+        val note = NoteContent(title, text)
+        return SharedDraft("", title, text, emptyList(), note = note, autoSave = true)
+    }
+
     @Synchronized fun remove(id: String){val draft=drafts.value.firstOrNull {it.id==id} ?: return;store(drafts.value.filterNot {it.id==id});draft.files.forEach {File(it.path).delete()}}
 }

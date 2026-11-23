@@ -31,7 +31,7 @@ class FeatureIntegrationTest {
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@feature.android.test","test-password-123"))
         app.preferences.automatic(false);app.preferences.save(session,TestServer.url);return session
     }
-    @Test fun taskLinkOpensEditableDraftAndOnlySavesOnConfirmation() = runBlocking(Dispatchers.IO) {
+    @Test fun taskLinkCreatesTaskWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
         val session = account()
         val repo = Repository(app, session, false)
         app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
@@ -39,20 +39,20 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-            compose.waitUntil(20000) { compose.onAllNodesWithText("Draft from ChatGPT").fetchSemanticsNodes().isNotEmpty() }
+            withTimeout(20000) { while (app.shareInbox.drafts.value.isEmpty()) delay(100) }
             val draft = app.shareInbox.drafts.value.single()
-            assertNull(repo.dao.item(draft.id))
-            compose.onNodeWithText("Сохранить").performClick()
             withTimeout(15000) { while (repo.dao.item(draft.id) == null) delay(100) }
+            assertTrue(draft.autoSave)
             val task = WireJson.decodeFromString<Item>(checkNotNull(repo.dao.item(draft.id)).localJson).content as TaskContent
             assertEquals("Draft from ChatGPT", task.title)
             assertEquals("2027-01-20", task.dueDate)
             assertEquals("18:00", task.dueTime)
             withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            compose.onNodeWithText("Draft from ChatGPT").assertIsDisplayed()
         }
         repo.database.close()
     }
-    @Test fun noteLinkOpensEditableDraftAndOnlySavesOnConfirmation() = runBlocking(Dispatchers.IO) {
+    @Test fun noteLinkCreatesNoteWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
         val session = account()
         val repo = Repository(app, session, false)
         app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
@@ -60,16 +60,16 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-            compose.waitUntil(20000) { compose.onAllNodesWithText("Note from ChatGPT").fetchSemanticsNodes().isNotEmpty() }
+            withTimeout(20000) { while (app.shareInbox.drafts.value.isEmpty()) delay(100) }
             val draft = app.shareInbox.drafts.value.single()
             assertNotNull(draft.note)
-            assertNull(repo.dao.item(draft.id))
-            compose.onNodeWithText("Сохранить").performClick()
             withTimeout(15000) { while (repo.dao.item(draft.id) == null) delay(100) }
+            assertTrue(draft.autoSave)
             val note = WireJson.decodeFromString<Item>(checkNotNull(repo.dao.item(draft.id)).localJson).content as NoteContent
             assertEquals("Note from ChatGPT", note.title)
             assertEquals("Keep this idea", note.text)
             withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            compose.onNodeWithText("Note from ChatGPT").assertIsDisplayed()
         }
         repo.database.close()
     }
@@ -153,7 +153,7 @@ class FeatureIntegrationTest {
             compose.onAllNodesWithText("Проект из интерфейса").onLast().assertIsDisplayed()
         }
     }
-    @Test fun shareCopiesFileBeforeSourceDisappearsAndRequiresConfirmation()=runBlocking(Dispatchers.IO) {
+    @Test fun sharingTextAndFileSavesNoteAutomatically()=runBlocking(Dispatchers.IO) {
         Assume.assumeTrue(Build.VERSION.SDK_INT>=29)
         val session=account();val repo=Repository(app,session,false)
         app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
@@ -164,14 +164,50 @@ class FeatureIntegrationTest {
         resolver.delete(uri,null,null)
         val draft=app.shareInbox.drafts.value.single()
         assertEquals("shared-private-copy",File(draft.files.single().path).readText())
+        assertTrue(draft.autoSave)
         assertTrue(repo.dao.items().isEmpty())
         ActivityScenario.launch(MainActivity::class.java).use {
-            compose.waitUntil(15000){compose.onAllNodesWithText("Создать заметку").fetchSemanticsNodes().isNotEmpty()}
-            compose.onNodeWithText("Создать заметку").performClick()
+            compose.waitUntil(15000){compose.onAllNodesWithText("Заметка добавлена").fetchSemanticsNodes().isNotEmpty()}
             withTimeout(15000){while(app.shareInbox.drafts.value.isNotEmpty())delay(100)}
             val note=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
             assertEquals("https://example.com/article",note.text)
             assertEquals("shared-private-copy",File(repo.dao.file(note.attachmentIds.single())!!.path!!).readText())
+        }
+        repo.database.close()
+    }
+    @Test fun sharingTaskDirectiveCreatesTaskAndParsesItsDeadline()=runBlocking(Dispatchers.IO) {
+        val session=account();val repo=Repository(app,session,false)
+        app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
+        val tomorrow=LocalDate.now().plusDays(1)
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(
+            Intent.EXTRA_TEXT,"Задача: Позвонить врачу завтра в 18:30\nПопросить направление на анализы"
+        ))
+        val draft=app.shareInbox.drafts.value.single()
+        assertTrue(draft.autoSave);assertNotNull(draft.task)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000){runBlocking(Dispatchers.IO){repo.dao.item(draft.id)!=null && app.shareInbox.drafts.value.isEmpty()}}
+            val task=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as TaskContent
+            assertEquals("Позвонить врачу",task.title)
+            assertEquals(tomorrow.toString(),task.dueDate)
+            assertEquals("18:30",task.dueTime)
+            assertEquals("Попросить направление на анализы",task.description)
+            compose.onNodeWithText("Позвонить врачу").assertIsDisplayed()
+        }
+        repo.database.close()
+    }
+    @Test fun sharingAmbiguousTaskOpensReviewInsteadOfGuessing()=runBlocking(Dispatchers.IO) {
+        val session=account();val repo=Repository(app,session,false)
+        app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(
+            Intent.EXTRA_TEXT,"Задача: Позвонить врачу в пятницу вечером"
+        ))
+        val draft=app.shareInbox.drafts.value.single()
+        assertFalse(draft.autoSave);assertNotNull(draft.task)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000){compose.onAllNodesWithText("Сохранить").fetchSemanticsNodes().isNotEmpty()}
+            assertNull(repo.dao.item(draft.id))
+            compose.onNodeWithText("Сохранить").performClick()
+            withTimeout(15000){while(repo.dao.item(draft.id)==null)delay(100)}
         }
         repo.database.close()
     }

@@ -48,7 +48,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import java.util.UUID
 
-private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, добавляй Markdown-ссылку [Открыть задачу](https://narysh.github.io/habit-tracker/task/#title=...). Передавай только названные мной поля: title, description, date (ГГГГ-ММ-ДД), time (ЧЧ:ММ только вместе с датой). Когда я прошу сохранить заметку, добавляй ссылку [Открыть заметку](https://narysh.github.io/habit-tracker/task/#kind=note&title=...&text=...). Кодируй значения URL-кодированием UTF-8. Не придумывай сроки. Напиши, что запись сохранится только после того, как я проверю её и нажму «Сохранить» в Habit Tracker."""
+private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, ответь коротким текстом, который начинается с «Задача:». Добавляй срок и время только если я их назвал; не придумывай их. Когда я прошу сохранить заметку, выдай «Заметка: Заголовок» с текстом заметки на следующих строках. Не добавляй вступление и Markdown-ссылки. Я отправлю этот ответ через системное «Поделиться → Habit Tracker»; выбранная задача или заметка сохранится сразу."""
 
 class MainActivity : ComponentActivity() {
     private fun receive(intent: Intent) {
@@ -130,6 +130,13 @@ private fun Content.description(): String = when(this) {
     val backupPreview by vm.backupPreview.collectAsStateWithLifecycle()
     val reminderOptions by vm.reminderSettings.collectAsStateWithLifecycle()
     LaunchedEffect(shareError){shareError?.let {vm.message.value=it;vm.app.shareInbox.error.value=null}}
+    val autoSaveDraft = incoming.firstOrNull { it.autoSave }
+    LaunchedEffect(autoSaveDraft?.id, session?.userId) {
+        if (session != null && autoSaveDraft != null) {
+            val asTask = autoSaveDraft.task != null
+            vm.acceptShare(autoSaveDraft, asTask) { tab = if (asTask) 1 else 3 }
+        }
+    }
     LaunchedEffect(shortcut,session?.userId){if(shortcut && session!=null){feature="quick";vm.app.shortcut.value=false}}
     val exportPicker=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")){uri->uri?.let {vm.exportBackup(it)}}
     val importPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->uri?.let {vm.inspectBackup(it)}}
@@ -206,7 +213,7 @@ private fun Content.description(): String = when(this) {
         "backup"->BackupDialog(backupPreview,busy,{feature=null},{exportPicker.launch("habit-tracker-${LocalDate.now()}.zip")},{importPicker.launch(arrayOf("application/zip","application/octet-stream","application/x-zip-compressed"))},{vm.restoreBackup()},{vm.cancelBackup()})
     }
     selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
-    if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.let { draft ->
+    if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.takeUnless { it.autoSave }?.let { draft ->
         val content = draft.task ?: draft.note
         if (content == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
         else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) })
@@ -393,7 +400,7 @@ private fun Content.description(): String = when(this) {
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Мобильное приложение ChatGPT пока не подключает MCP. Можно настроить один раз: скопируй инструкцию, вставь её в ChatGPT → Настройки → Пользовательские инструкции. После этого ChatGPT будет добавлять ссылки для задач и заметок в любом чате.")
-                Text("Когда появится ссылка, открой её, проверь запись и нажми «Сохранить». Без этого шага запись не создаётся.", style = MaterialTheme.typography.bodySmall)
+                Text("В мобильном ChatGPT выбери «Поделиться → Habit Tracker». Если ответ начинается с «Задача:» или «Заметка:», запись появится сразу после отправки. Старые ссылки открывают черновик для проверки.", style = MaterialTheme.typography.bodySmall)
                 Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Habit Tracker", mobileChatGptInstructions))

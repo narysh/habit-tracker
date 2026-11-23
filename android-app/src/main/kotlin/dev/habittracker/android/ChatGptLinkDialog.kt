@@ -82,7 +82,7 @@ fun ChatGptLinkDialog(vm: AppViewModel, account: Session, close: () -> Unit) {
                     }
                 }
                 Text(
-                    "В приложении ChatGPT на телефоне MCP пока недоступен. Чтобы перенести текст, выбери в ChatGPT «Поделиться → Habit Tracker», проверь черновик и сохрани его.",
+                    "В мобильном ChatGPT выбери «Поделиться → Habit Tracker»: отправленный текст сразу сохранится как задача или заметка. Для задачи начни строку с «Задача:», для заметки — с «Заметка:».",
                     style = MaterialTheme.typography.bodySmall
                 )
                 error?.let { Text(it) }
