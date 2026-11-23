@@ -43,16 +43,40 @@ jobs:
       - name: Start disposable Android emulator
         run: |
           echo no | avdmanager create avd --force --name habit-ci --package 'system-images;android-36;google_apis;x86_64' --device pixel_2
-          emulator -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 &
-          adb wait-for-device
+          emulator -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 > "$RUNNER_TEMP/habit-emulator.log" 2>&1 &
+          emulator_pid=$!
+          echo "$emulator_pid" > "$RUNNER_TEMP/habit-emulator.pid"
+          device_ready=false
           for attempt in $(seq 1 90); do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then break; fi
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/habit-emulator.log"
+              exit 1
+            fi
+            if [ "$(adb -s emulator-5554 get-state 2>/dev/null | tr -d '\r')" = "device" ]; then device_ready=true; break; fi
             sleep 2
           done
-          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
+          if [ "$device_ready" != true ]; then
+            cat "$RUNNER_TEMP/habit-emulator.log"
+            echo 'Android emulator did not appear in adb within 180 seconds.'
+            exit 1
+          fi
+          boot_completed=false
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/habit-emulator.log"
+              exit 1
+            fi
+            if [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then boot_completed=true; break; fi
+            sleep 2
+          done
+          if [ "$boot_completed" != true ]; then
+            cat "$RUNNER_TEMP/habit-emulator.log"
+            echo 'Android emulator did not finish booting within 180 seconds.'
+            exit 1
+          fi
+          adb -s emulator-5554 shell settings put global window_animation_scale 0
+          adb -s emulator-5554 shell settings put global transition_animation_scale 0
+          adb -s emulator-5554 shell settings put global animator_duration_scale 0
       - name: Run Android integration tests against disposable backend
         run: |
           mkdir -p .local
@@ -86,6 +110,16 @@ jobs:
           name: habit-tracker-android-instrumentation
           path: android-app/build/outputs/androidTest-results/connected
           if-no-files-found: ignore
+      - name: Stop disposable Android emulator
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/habit-emulator.pid" ]; then
+            emulator_pid=$(cat "$RUNNER_TEMP/habit-emulator.pid")
+            kill "$emulator_pid" 2>/dev/null || true
+            wait "$emulator_pid" 2>/dev/null || true
+          fi
+          adb -s emulator-5554 emu kill 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/habit-emulator.log" ]; then cat "$RUNNER_TEMP/habit-emulator.log"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: habit-tracker-debug
