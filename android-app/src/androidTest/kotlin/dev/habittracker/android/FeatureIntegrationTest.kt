@@ -11,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.core.content.ContextCompat
 import dev.habittracker.shared.*
 import kotlinx.coroutines.*
 import org.junit.*
@@ -18,6 +19,7 @@ import org.junit.Assert.*
 import org.junit.runner.RunWith
 import java.io.File
 import java.time.*
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 import java.util.zip.*
 
@@ -30,6 +32,32 @@ class FeatureIntegrationTest {
             .grantRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@feature.android.test","test-password-123"))
         app.preferences.automatic(false);app.preferences.save(session,TestServer.url);return session
+    }
+    @Test fun reminderPermissionIsRequestedAfterSavingAndDeferringKeepsTheTask() {
+        org.junit.Assume.assumeTrue(Build.VERSION.SDK_INT >= 33)
+        account()
+        InstrumentationRegistry.getInstrumentation().uiAutomation.revokeRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
+        app.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).edit().remove("notification-permission-prompt-shown").commit()
+        val title="Task with reminder without permission"
+        val date=LocalDate.now().plusDays(1).format(DateTimeFormatter.ofPattern("dd.MM.uuuu"))
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Добавить").performClick()
+            compose.onNodeWithText("Задачу").performClick()
+            compose.onNodeWithText("Название").performTextInput(title)
+            compose.onNodeWithText("Дата · дд.мм.гггг").performTextInput(date)
+            compose.onNodeWithText("Время · чч:мм, необязательно").performTextInput("18:00")
+            compose.onNodeWithText("Напомнить за минут · необязательно").performTextInput("30")
+            compose.onNodeWithText("Сохранить").performClick()
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Напоминания Habit Tracker").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(android.content.pm.PackageManager.PERMISSION_DENIED,ContextCompat.checkSelfPermission(app,Manifest.permission.POST_NOTIFICATIONS))
+            compose.onNodeWithText("Не сейчас").performClick()
+            runBlocking(Dispatchers.IO) {
+                val saved=app.repository()!!.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                    .mapNotNull { it.content as? TaskContent }.single { it.title==title }
+                assertEquals(30,saved.reminderMinutes)
+            }
+        }
     }
     @Test fun taskLinkCreatesTaskWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
         val session = account()

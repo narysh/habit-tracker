@@ -16,6 +16,9 @@ import java.time.*
 object Reminders {
     private const val channel="reminders"
     private const val summaryId="daily-summary"
+    private const val permissionPromptShownKey="notification-permission-prompt-shown"
+    fun permissionPromptShown(context: Context): Boolean = context.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).getBoolean(permissionPromptShownKey,false)
+    fun markPermissionPromptShown(context: Context) { check(context.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).edit().putBoolean(permissionPromptShownKey,true).commit()) }
     fun settings(context: Context): ReminderSettings=runCatching {WireJson.decodeFromString<ReminderSettings>(context.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).getString("value",null) ?: return ReminderSettings())}.getOrDefault(ReminderSettings())
     fun saveSettings(context: Context,value: ReminderSettings){value.validate();check(context.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).edit().putString("value",WireJson.encodeToString(value)).commit())}
     fun createChannel(context: Context){context.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(channel,"Задачи и привычки",NotificationManager.IMPORTANCE_DEFAULT))}

@@ -4,8 +4,10 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -31,6 +33,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
@@ -73,6 +77,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 private val dateFormat=DateTimeFormatter.ofPattern("dd.MM.uuuu").withResolverStyle(ResolverStyle.STRICT)
+private fun openNotificationSettings(context: Context) {
+    val intent=Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,context.packageName)
+    try { context.startActivity(intent) } catch (_: android.content.ActivityNotFoundException) {
+        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.parse("package:${context.packageName}")))
+    }
+}
 private fun localDate(value: String?): String = value?.let { LocalDate.parse(it).format(dateFormat) }.orEmpty()
 private fun parseDate(value: String): String? = value.trim().takeIf(String::isNotEmpty)?.let { LocalDate.parse(it,dateFormat).toString() }
 private fun countLabel(count: Int,one: String,few: String,many: String): String {
@@ -90,6 +100,7 @@ private fun Content.description(): String = when(this) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun TrackerApp(vm: AppViewModel=viewModel()) {
     val session by vm.session.collectAsStateWithLifecycle()
+    val context=LocalContext.current
     val lifecycle=LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle,session?.userId) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -120,11 +131,19 @@ private fun Content.description(): String = when(this) {
     var deleting by remember { mutableStateOf<Item?>(null) }
     var history by remember { mutableStateOf<Item?>(null) }
     var chooser by remember { mutableStateOf(false) }
+    var notificationPermissionPrompt by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     val now by produceState(Instant.now()) { while(true) { value=Instant.now(); kotlinx.coroutines.delay(30000) } }
     val deviceToday = now.atZone(ZoneId.systemDefault()).toLocalDate()
-    val permission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    LaunchedEffect(session?.userId) { if(session!=null && Build.VERSION.SDK_INT>=33) permission.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    val permission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if(!granted) vm.message.value="Запись сохранена. Чтобы получать напоминания, включи уведомления в настройках приложения."
+    }
+    fun offerNotificationPermission() {
+        if(!NotificationManagerCompat.from(context).areNotificationsEnabled() && !Reminders.permissionPromptShown(context)) {
+            Reminders.markPermissionPromptShown(context)
+            notificationPermissionPrompt=true
+        }
+    }
     val incoming by vm.app.shareInbox.drafts.collectAsStateWithLifecycle()
     val shareError by vm.app.shareInbox.error.collectAsStateWithLifecycle()
     val shortcut by vm.app.shortcut.collectAsStateWithLifecycle()
@@ -210,17 +229,17 @@ private fun Content.description(): String = when(this) {
         "week"->WeekDialog(records,{feature=null},{openRecord(it)}){item,date->val task=item.content as TaskContent;vm.save(task.copy(dueDate=date.toString()),item.id)}
         "stats"->StatisticsDialog(records){feature=null}
         "review"->ReviewDialog(records,{feature=null}){selectedPlan=it}
-        "reminders"->ReminderSettingsDialog(reminderOptions,{feature=null}){value->vm.saveReminderSettings(value){feature=null}}
+        "reminders"->ReminderSettingsDialog(reminderOptions,{feature=null},{value->vm.saveReminderSettings(value){feature=null;if(value.summaryEnabled)offerNotificationPermission()}}){openNotificationSettings(context)}
         "backup"->BackupDialog(backupPreview,busy,{feature=null},{exportPicker.launch("habit-tracker-${LocalDate.now()}.zip")},{importPicker.launch(arrayOf("application/zip","application/octet-stream","application/x-zip-compressed"))},{vm.restoreBackup()},{vm.cancelBackup()})
     }
     selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
     if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.takeUnless { it.autoSave }?.let { draft ->
         val content = draft.task ?: draft.habit ?: draft.note
         if (content == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
-        else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) }, draft.reviewWarning)
+        else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) }, draft.reviewWarning, {offerNotificationPermission()})
     }
     if(chooser) AlertDialog(onDismissRequest={chooser=false},title={Text("Добавить")},text={Column { listOf("Задачу","Привычку","Заметку").forEachIndexed { index,label -> TextButton(onClick={chooser=false;newItem(index+1)}) { Text(label) } } }},confirmButton={TextButton(onClick={chooser=false}) {Text("Закрыть")}})
-    editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)}) }
+    editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)},onReminderSaved={offerNotificationPermission()}) }
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
@@ -238,7 +257,18 @@ private fun Content.description(): String = when(this) {
         confirmButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false;vm.deleteAccount()},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)){Text("Удалить аккаунт и данные")}},
         dismissButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false}){Text("Отмена")}}
     )
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT через MCP")}; TextButton(onClick={settings=false;mobileChatSetup=true}) {Text("Настроить импорт из ChatGPT на телефоне")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(notificationPermissionPrompt) AlertDialog(
+        onDismissRequest={notificationPermissionPrompt=false},
+        title={Text("Напоминания Habit Tracker")},
+        text={Text("Разреши уведомления, чтобы получать напоминания о выбранных задачах и привычках или ежедневную сводку. Запись и настройки уже сохранены; отказ не отменит их. Позже разрешение можно изменить в настройках уведомлений Android.")},
+        confirmButton={TextButton(onClick={
+            notificationPermissionPrompt=false
+            if(Build.VERSION.SDK_INT>=33 && ContextCompat.checkSelfPermission(context,Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            else openNotificationSettings(context)
+        }){Text("Разрешить уведомления")}},
+        dismissButton={TextButton(onClick={notificationPermissionPrompt=false}){Text("Не сейчас")}}
+    )
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={openNotificationSettings(context)}) {Text("Настройки уведомлений Android")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT через MCP")}; TextButton(onClick={settings=false;mobileChatSetup=true}) {Text("Настроить импорт из ChatGPT на телефоне")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
@@ -336,7 +366,7 @@ private fun Content.description(): String = when(this) {
     val count=(ChronoUnit.DAYS.between(LocalDate.parse(habit.startsOn),today)+1).coerceIn(0,100000).toInt()
     AlertDialog(onDismissRequest=close,title={Text("История: ${habit.title}")},text={LazyColumn(Modifier.heightIn(max=420.dp)) { items(count) { index -> val date=today.minusDays(index.toLong()); Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) { Text(date.format(dateFormat),Modifier.weight(1f)); if(habit.isDue(date)) Checkbox(date.toString() in marks,{mark(date,it)}) else Text("Выходной",style=MaterialTheme.typography.labelSmall) } } }},confirmButton={TextButton(onClick=close) {Text("Готово")}})
 }
-@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit,notice: String? = null) {
+@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit,notice: String? = null,onReminderSaved: ()->Unit = {}) {
     var title by remember(id) { mutableStateOf(initial.title) }
     var body by remember(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; is ProjectContent -> initial.description; else -> "" }) }
     var date by remember(id) { mutableStateOf(localDate((initial as? TaskContent)?.dueDate)) }
@@ -359,7 +389,7 @@ private fun Content.description(): String = when(this) {
         is ProjectContent -> initial.copy(title=title.trim(),description=body,isGoal=goal)
         else -> initial
     }.withOrganization(organization)
-    fun submit(after: ()->Unit) { try { val value=content();value.validate();vm.save(value,id,after) } catch(e: Exception) { error=e.message ?: "Проверь поля формы" } }
+    fun submit(after: ()->Unit) { try { val value=content();value.validate();val hasReminder=when(value){is TaskContent->value.reminderMinutes!=null;is HabitContent->value.reminderTime!=null;else->false};vm.save(value,id){if(hasReminder)onReminderSaved();after()} } catch(e: Exception) { error=e.message ?: "Проверь поля формы" } }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.attach(id,it) } }
     AlertDialog(onDismissRequest=close,title={Text(if(initial is TaskContent) "Задача" else if(initial is HabitContent) "Привычка" else if(initial is ProjectContent) "Проект или цель" else "Заметка")},text={Column(Modifier.heightIn(max=500.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         notice?.let { Text(it, color=MaterialTheme.colorScheme.error) }

@@ -155,14 +155,15 @@ private val shortDate=DateTimeFormatter.ofPattern("d MMM",Locale.forLanguageTag(
     }
     if(confirm)AlertDialog(onDismissRequest={confirm=false},title={Text("Применить план?")},text={Text("Перенести ${plan.moves.size} задач на показанные даты? Если задачи успели измениться, весь план будет отклонён.")},confirmButton={TextButton(onClick={confirm=false;apply()},enabled=!busy){Text("Подтвердить")}},dismissButton={TextButton(onClick={confirm=false}){Text("Отмена")}})
 }
-@Composable fun ReminderSettingsDialog(initial: ReminderSettings,close: ()->Unit,save: (ReminderSettings)->Unit) {
+@Composable fun ReminderSettingsDialog(initial: ReminderSettings,close: ()->Unit,save: (ReminderSettings)->Unit,openNotificationSettings: ()->Unit) {
     var value by remember {mutableStateOf(initial)};var error by remember {mutableStateOf<String?>(null)}
     FeatureDialog("Напоминания",close){
         Row(verticalAlignment=Alignment.CenterVertically){Switch(value.quietEnabled,{value=value.copy(quietEnabled=it)});Text("Тихие часы")}
         if(value.quietEnabled){OutlinedTextField(value.quietStart,{value=value.copy(quietStart=it)},label={Text("Начало · чч:мм")});OutlinedTextField(value.quietEnd,{value=value.copy(quietEnd=it)},label={Text("Конец · чч:мм")})}
         Row(verticalAlignment=Alignment.CenterVertically){Switch(value.summaryEnabled,{value=value.copy(summaryEnabled=it,summaryOnly=value.summaryOnly && it)});Text("Ежедневная сводка")}
-        if(value.summaryEnabled){OutlinedTextField(value.summaryTime,{value=value.copy(summaryTime=it)},label={Text("Время сводки · чч:мм")});Row(verticalAlignment=Alignment.CenterVertically){Switch(value.summaryOnly,{value=value.copy(summaryOnly=it)});Text("Только сводка, без отдельных напоминаний")}}
+        if(value.summaryEnabled){Text("Получай сводку о задачах и привычках в выбранное время.");OutlinedTextField(value.summaryTime,{value=value.copy(summaryTime=it)},label={Text("Время сводки · чч:мм")});Row(verticalAlignment=Alignment.CenterVertically){Switch(value.summaryOnly,{value=value.copy(summaryOnly=it)});Text("Только сводка, без отдельных напоминаний")}}
         Text("В уведомлениях доступны «Выполнено», «Через час» и «Завтра». Android может задерживать уведомления для экономии батареи.")
+        TextButton(onClick=openNotificationSettings){Text("Открыть настройки уведомлений Android")}
         error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
         Button(onClick={try{value.validate();save(value)}catch(e:Exception){error=e.message}}){Text("Сохранить настройки")}
     }
