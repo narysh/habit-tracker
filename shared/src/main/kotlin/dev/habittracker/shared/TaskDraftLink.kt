@@ -28,7 +28,10 @@ private fun draftFields(link: String, directPath: String, allowed: Set<String>):
 
 /** A link supplies only editable task fields. Account, record ID and actions are never taken from it. */
 fun taskDraftFromLink(link: String, zoneId: String): TaskContent {
-    val (fields, _) = draftFields(link, "/task", setOf("title", "description", "date", "time"))
+    val isWebLink = link.startsWith("$TASK_DRAFT_PAGE#")
+    val allowed = setOf("title", "description", "date", "time") + if (isWebLink) setOf("kind") else emptySet()
+    val (fields, isWeb) = draftFields(link, "/task", allowed)
+    if (isWeb) require(fields["kind"] == null || fields["kind"] == "task") { "В ссылке указан не черновик задачи" }
     val title = fields["title"].orEmpty().trim()
     val description = fields["description"].orEmpty()
     require(title.none(Char::isISOControl) && description.none { it.isISOControl() && it != '\n' && it != '\t' } && description.length <= 1000) {
@@ -57,8 +60,10 @@ fun noteDraftFromLink(link: String): NoteContent {
 
 /** A habit link supplies only its schedule. The app chooses today's local start date and zone. */
 fun habitDraftFromLink(link: String, zoneId: String, today: LocalDate = LocalDate.now(ZoneId.of(zoneId))): HabitContent {
-    val (fields, isWeb) = draftFields(link, "/habit", setOf("title", "description", "days", "target"))
-    require(!isWeb) { "Ссылка на привычку должна открываться непосредственно в Habit Tracker" }
+    val isWebLink = link.startsWith("$TASK_DRAFT_PAGE#")
+    val allowed = setOf("title", "description", "days", "target") + if (isWebLink) setOf("kind") else emptySet()
+    val (fields, isWeb) = draftFields(link, "/habit", allowed)
+    if (isWeb) require(fields["kind"] == "habit") { "В ссылке указан не черновик привычки" }
     val title = fields["title"].orEmpty().trim()
     val description = fields["description"].orEmpty()
     require(title.none(Char::isISOControl) && description.none { it.isISOControl() && it != '\n' && it != '\t' }) {
@@ -82,7 +87,12 @@ fun habitDraftFromLink(link: String, zoneId: String, today: LocalDate = LocalDat
 
 fun contentDraftFromLink(link: String, zoneId: String): Content {
     val uri = URI.create(link)
-    if (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/habit") {
+    val isHabit = (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/habit") ||
+        (link.startsWith("$TASK_DRAFT_PAGE#") && uri.rawFragment.orEmpty().split('&').any {
+            URLDecoder.decode(it.substringBefore('='), Charsets.UTF_8.name()) == "kind" &&
+                URLDecoder.decode(it.substringAfter('=', ""), Charsets.UTF_8.name()) == "habit"
+        })
+    if (isHabit) {
         return habitDraftFromLink(link, zoneId)
     }
     val isNote = (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/note") ||

@@ -3,7 +3,9 @@ const params = new URLSearchParams(fragment);
 const kind = params.get("kind") ?? "task";
 const allowed = kind === "note"
   ? new Set(["kind", "title", "text"])
-  : new Set(["title", "description", "date", "time"]);
+  : kind === "habit"
+    ? new Set(["kind", "title", "description", "days", "target"])
+    : new Set(["kind", "title", "description", "date", "time"]);
 const fields = new Set();
 let valid = fragment.length <= 7900;
 for (const [key] of params) {
@@ -16,12 +18,28 @@ const date = params.get("date");
 const time = params.get("time");
 const description = params.get("description") ?? "";
 const noteText = params.get("text") ?? "";
+const days = params.get("days");
+const target = params.get("target");
+const validHabitSchedule = (Boolean(days) !== Boolean(target)) && (days
+  ? /^[1-7](,[1-7])*$/.test(days) && new Set(days.split(",")).size === days.split(",").length
+  : /^[1-7]$/.test(target ?? ""));
+const link = document.getElementById("open");
 if (kind === "note" && valid && title && title.length <= 300 && noteText.length <= 3000) {
   document.getElementById("page-title").textContent = "Черновик заметки";
   document.getElementById("task-title").textContent = title;
   document.getElementById("status").textContent = "Проверь и сохрани заметку в приложении.";
-  const link = document.getElementById("open");
-  link.href = "habittracker://import/note?" + new URLSearchParams({ title, text: noteText }).toString();
+  const appParams = new URLSearchParams(params);
+  appParams.delete("kind");
+  link.href = "habittracker://import/note?" + appParams.toString();
+  link.textContent = "Открыть в Habit Tracker";
+  link.hidden = false;
+} else if (kind === "habit" && valid && title && title.length <= 300 && description.length <= 1000 && validHabitSchedule) {
+  document.getElementById("page-title").textContent = "Черновик привычки";
+  document.getElementById("task-title").textContent = title;
+  document.getElementById("status").textContent = "Открой ссылку в приложении, чтобы сохранить привычку.";
+  const appParams = new URLSearchParams(params);
+  appParams.delete("kind");
+  link.href = "habittracker://import/habit?" + appParams.toString();
   link.textContent = "Открыть в Habit Tracker";
   link.hidden = false;
 } else if (kind === "task" && valid && title && title.length <= 300 && description.length <= 1000 &&
@@ -29,8 +47,9 @@ if (kind === "note" && valid && title && title.length <= 300 && noteText.length 
     (!time || (date && /^[0-9]{2}:[0-9]{2}$/.test(time)))) {
   document.getElementById("task-title").textContent = title;
   document.getElementById("status").textContent = "Проверь и сохрани задачу в приложении.";
-  const link = document.getElementById("open");
-  link.href = "habittracker://import/task?" + params.toString();
+  const appParams = new URLSearchParams(params);
+  appParams.delete("kind");
+  link.href = "habittracker://import/task?" + appParams.toString();
   link.textContent = "Открыть в Habit Tracker";
   link.hidden = false;
 } else if (fragment) {

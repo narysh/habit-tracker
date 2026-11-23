@@ -136,6 +136,31 @@ class FeatureIntegrationTest {
         }
         repo.database.close()
     }
+    @Test fun verifiedHttpsAppLinkCreatesHabitWhenOpened() = runBlocking(Dispatchers.IO) {
+        val session = account()
+        val repo = Repository(app, session, false)
+        app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        app.shareInbox.error.value = null
+        val title = "Habit from verified web link"
+        val link = Uri.parse("https://narysh.github.io/habit-tracker/task/#kind=habit&title=Habit%20from%20verified%20web%20link&days=2%2C4")
+        val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
+        assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            withTimeout(20000) {
+                while (repo.dao.items().none {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
+                } && app.shareInbox.error.value == null) delay(100)
+            }
+            assertNull(app.shareInbox.error.value)
+            val habit = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                .mapNotNull { it.content as? HabitContent }.single { it.title == title }
+            assertEquals(HabitMode.WEEKDAYS, habit.mode)
+            assertEquals(setOf(2, 4), habit.weekdays)
+            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            compose.onNodeWithText(title).assertIsDisplayed()
+        }
+        repo.database.close()
+    }
     @Test fun existingRoomDatabaseOpensWithBundledDriverWithoutLosingOutbox()=runBlocking(Dispatchers.IO) {
         val key="driver-migration-${UUID.randomUUID()}";val id=UUID.randomUUID().toString()
         val item=Item(id,0,TaskContent("Сохранено в старой версии"),false,Instant.now().toString(),0)
