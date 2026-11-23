@@ -32,8 +32,8 @@ android {
         applicationId = "dev.habittracker.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.5.0-preview.8"
+        versionCode = 13
+        versionName = "0.5.0-preview.9"
         buildConfigField("String", "BACKEND_ORIGIN", "\"$backendOrigin\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
