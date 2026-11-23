@@ -22,6 +22,27 @@ class FeatureStoreTest {
         assertFails {create(bob,NoteContent("Чужая связь",organization=Organization(linkedIds=setOf(note.id))))}
         assertNull(store.get(bob.userId,task.id))
     }
+    @Test fun `a referenced project or goal cannot be deleted until active records are unlinked`() {
+        val alice=user()
+        val project=create(alice,ProjectContent("Учёба"))
+        val goal=create(alice,ProjectContent("Стажировка",isGoal=true))
+        val task=create(alice,TaskContent("Откликнуться",organization=Organization(projectId=project.id,goalId=goal.id)))
+
+        assertFailsWith<IllegalArgumentException> {
+            store.mutate(alice.userId,Mutation(UUID.randomUUID().toString(),project.id,project.version,project.content,true))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            store.mutate(alice.userId,Mutation(UUID.randomUUID().toString(),goal.id,goal.version,goal.content,true))
+        }
+        assertFalse(store.get(alice.userId,project.id)!!.deleted)
+        assertFalse(store.get(alice.userId,goal.id)!!.deleted)
+
+        val unlinked=store.mutate(alice.userId,Mutation(UUID.randomUUID().toString(),task.id,task.version,
+            (task.content as TaskContent).copy(organization=Organization()))).item!!
+        assertTrue(store.mutate(alice.userId,Mutation(UUID.randomUUID().toString(),project.id,project.version,project.content,true)).item!!.deleted)
+        assertTrue(store.mutate(alice.userId,Mutation(UUID.randomUUID().toString(),goal.id,goal.version,goal.content,true)).item!!.deleted)
+        assertEquals(2L,unlinked.version)
+    }
     @Test fun `AI proposal does not move tasks until explicit atomic application and retry is idempotent`() {
         val alice=user();val a=create(alice,TaskContent("A",dueDate="2026-11-09"));val b=create(alice,TaskContent("B",dueDate="2026-11-09"))
         val plan=create(alice,WeekPlanContent("Более свободная неделя","2026-11-09","Распределить задачи",listOf(PlanMove(a.id,a.version,"2026-11-10"),PlanMove(b.id,b.version,"2026-11-12"))))

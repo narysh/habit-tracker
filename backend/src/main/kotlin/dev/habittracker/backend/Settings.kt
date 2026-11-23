@@ -16,7 +16,7 @@ data class Settings(
     val port: Int = 8081,
     val publicPlugin: Boolean = false,
     val openAiDomainChallenge: String? = null,
-    val trustReverseProxy: Boolean = false,
+    val trustedClientIpHeader: String? = null,
     val s3Storage: S3StorageConfig? = null,
     val hostedMode: Boolean = false,
     val androidPublicUrl: String? = null,
@@ -28,7 +28,7 @@ data class Settings(
 
     override fun toString(): String = "Settings(publicUrl=$publicUrl, jdbcUrl=$jdbcUrl, dbUser=$dbUser, dbPassword=[redacted], " +
         "clientId=$clientId, clientSecret=[redacted], redirects=$redirects, files=$files, port=$port, " +
-        "publicPlugin=$publicPlugin, openAiDomainChallenge=[redacted], trustReverseProxy=$trustReverseProxy, " +
+        "publicPlugin=$publicPlugin, openAiDomainChallenge=[redacted], trustedClientIpHeader=$trustedClientIpHeader, " +
         "s3Storage=$s3Storage, hostedMode=$hostedMode, androidPublicUrl=$androidPublicUrl, connectionKeyMaterial=$connectionKeyMaterial)"
 
     init {
@@ -93,7 +93,9 @@ data class Settings(
                 port = env["PORT"]?.toInt() ?: 8081,
                 publicPlugin = env["PUBLIC_CHATGPT_PLUGIN"]?.toBooleanStrict() ?: false,
                 openAiDomainChallenge = env["OPENAI_APPS_CHALLENGE"]?.takeIf(String::isNotEmpty),
-                trustReverseProxy = env["TRUST_REVERSE_PROXY"]?.toBooleanStrict() ?: false,
+                trustedClientIpHeader = env["TRUSTED_CLIENT_IP_HEADER"]?.takeIf(String::isNotBlank)?.also {
+                    require(it in setOf("X-Real-IP", "CF-Connecting-IP")) { "TRUSTED_CLIENT_IP_HEADER must be X-Real-IP or CF-Connecting-IP" }
+                },
                 s3Storage = s3,
                 hostedMode = env["HOSTED_MODE"]?.toBooleanStrict() ?: false,
                 androidPublicUrl = (env["ANDROID_PUBLIC_URL"] ?: env["RENDER_EXTERNAL_URL"])?.trimEnd('/')?.takeIf(String::isNotEmpty),

@@ -220,6 +220,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         session.value=null; repository.value=null
         TrackerWidget.updateAll(app)
     }
+    fun changePassword(currentPassword: String,newPassword: String,after: ()->Unit) = action {
+        busy.value=true
+        try {
+            val account=requireNotNull(session.value) { "Сначала войди в аккаунт" }
+            Api(app.preferences.url()) { account.token }.request(
+                "/api/v1/account/password", "POST",
+                WireJson.encodeToString(PasswordChangeRequest(currentPassword,newPassword)).toByteArray()
+            )
+            message.value="Пароль изменён. Другие сеансы и подключение ChatGPT завершены."
+            withContext(Dispatchers.Main) { after() }
+        } finally { busy.value=false }
+    }
     fun deleteAccount() = action {
         val account=requireNotNull(session.value) { "Сначала войди в аккаунт" }
         busy.value=true

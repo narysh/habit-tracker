@@ -63,8 +63,11 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
                 if (r.next()) Triple(r.getString(1),r.getString(2),r.getString(3)) else null
             }
         } }
-        if (user == null) { Passwords.hash(credentials.password); return null }
-        if (user.third == null || !Passwords.verify(credentials.password,user.third)) return null
+        if (user == null || user.third == null) {
+            Passwords.hash(credentials.password)
+            return null
+        }
+        if (!Passwords.verify(credentials.password,user.third)) return null
         return Identity(user.first,user.second,setOf("tracker:read","tracker:write"))
     }
     fun login(credentials: Credentials): Session = newSession(checkPassword(credentials) ?: throw ApiFailure(401,"Неверный email или пароль"))
@@ -328,6 +331,31 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         c.prepareStatement("DELETE FROM sessions WHERE token_hash=? OR token_hash=?").use { it.setString(1,hash); it.setString(2,access ?: hash); it.executeUpdate() }
     } }
     fun revokeAll(userId: String) { tx { c -> c.prepareStatement("DELETE FROM sessions WHERE user_id=?::uuid").use { it.setString(1,userId); it.executeUpdate() } } }
+    fun changePassword(userId: String, currentToken: String, currentPassword: String, newPassword: String) {
+        require(newPassword.length in 10..128) { "Пароль: от 10 до 128 символов" }
+        val newHash=Passwords.hash(newPassword)
+        val currentTokenHash=digest(currentToken)
+        tx { c ->
+            lockAccount(c,userId)
+            val oldHash=c.prepareStatement("SELECT password_hash FROM users WHERE id=?::uuid").use { p ->
+                p.setString(1,userId);p.executeQuery().use { r -> if(r.next()) r.getString(1) else throw ApiFailure(401,"Войди в аккаунт") }
+            }
+            if(oldHash == null) {
+                require(currentPassword.isEmpty()) { "У аккаунта пока нет пароля — оставь поле текущего пароля пустым" }
+                val recentlyAuthenticated=c.prepareStatement("""SELECT 1 FROM sessions
+                    WHERE token_hash=? AND user_id=?::uuid AND expires_at>now()
+                    AND issued_at>=now()-INTERVAL '10 minutes'""").use { p ->
+                    p.setString(1,currentTokenHash);p.setString(2,userId);p.executeQuery().use { it.next() }
+                }
+                if(!recentlyAuthenticated) throw ApiFailure(401,"Сначала войди в аккаунт через привязанный способ ещё раз")
+            } else {
+                if(!Passwords.verify(currentPassword,oldHash)) throw ApiFailure(401,"Неверный текущий пароль")
+                require(!Passwords.verify(newPassword,oldHash)) { "Новый пароль должен отличаться от текущего" }
+            }
+            c.prepareStatement("UPDATE users SET password_hash=? WHERE id=?::uuid").use { p -> p.setString(1,newHash);p.setString(2,userId);p.executeUpdate() }
+            c.prepareStatement("DELETE FROM sessions WHERE user_id=?::uuid AND token_hash<>?").use { p -> p.setString(1,userId);p.setString(2,currentTokenHash);p.executeUpdate() }
+        }
+    }
     fun deleteAccount(userId: String, appToken: String) = tx { c ->
         lockAccount(c, userId)
         deleteAccountRows(c, userId, digest(appToken))
@@ -416,6 +444,14 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             }
             require(current == null || current.content.typeName() == mutation.content.typeName()) { "Нельзя менять тип записи" }
             val oldProject=current?.content as? ProjectContent;val newProject=mutation.content as? ProjectContent
+            if (mutation.deleted && oldProject != null) {
+                val referenced = c.prepareStatement("""SELECT 1 FROM items WHERE user_id=?::uuid AND id<>?::uuid AND NOT deleted AND (
+                    body->'organization'->>'projectId'=? OR body->'organization'->>'goalId'=? OR jsonb_exists(body->'organization'->'linkedIds', ?)) LIMIT 1""").use { p ->
+                    p.setString(1,userId);p.setString(2,mutation.itemId);p.setString(3,mutation.itemId);p.setString(4,mutation.itemId);p.setString(5,mutation.itemId)
+                    p.executeQuery().use { it.next() }
+                }
+                require(!referenced) { "Сначала убери этот проект или цель из связанных записей" }
+            }
             if(!mutation.deleted && oldProject?.isGoal==true && newProject?.isGoal==false) {
                 val linked=c.prepareStatement("SELECT 1 FROM items WHERE user_id=?::uuid AND NOT deleted AND body->'organization'->>'goalId'=? LIMIT 1").use {p->p.setString(1,userId);p.setString(2,mutation.itemId);p.executeQuery().use {it.next()}}
                 require(!linked){"Сначала убери эту цель из связанных записей"}

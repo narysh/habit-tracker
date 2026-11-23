@@ -15,7 +15,7 @@ services:
     environment:
       PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the stable HTTPS origin}
       ANDROID_PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the stable HTTPS origin}
-      TRUST_REVERSE_PROXY: "true"
+      TRUSTED_CLIENT_IP_HEADER: X-Real-IP
     restart: unless-stopped
     logging:
       driver: local

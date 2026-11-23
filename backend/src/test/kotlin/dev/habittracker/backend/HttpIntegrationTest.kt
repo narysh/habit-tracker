@@ -135,18 +135,81 @@ class HttpIntegrationTest {
             }
         }
     }
-    @Test fun `only explicit proxy mode accepts its client IP for throttling`() {
-        for (trusted in listOf(false,true)) testApplication {
-            application { backendModule(settings.copy(trustReverseProxy=trusted),store) }
-            repeat(21) { index ->
-                val response=client.post("/api/v1/auth/login") {
-                    header("X-Real-IP", "192.0.2.${index+1}")
-                    contentType(ContentType.Application.Json)
-                    setBody("{}")
-                }
-                assertEquals(if (!trusted && index==20) HttpStatusCode.TooManyRequests else HttpStatusCode.BadRequest,response.status)
+    @Test fun `client ip header is trusted only when explicitly configured and OAuth authorize is throttled`() = testApplication {
+        application { backendModule(settings,store) }
+        repeat(21) { index ->
+            val response=client.post("/api/v1/auth/login") {
+                header("CF-Connecting-IP", "192.0.2.${index+1}")
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            assertEquals(if (index==20) HttpStatusCode.TooManyRequests else HttpStatusCode.BadRequest,response.status)
+        }
+    }
+
+    @Test fun `configured proxy header is used and OAuth authorize is throttled`() = testApplication {
+        application { backendModule(settings.copy(trustedClientIpHeader="CF-Connecting-IP"),store) }
+        repeat(20) { index ->
+            val response=client.post("/api/v1/auth/login") {
+                header("CF-Connecting-IP", "192.0.2.${index+1}")
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            assertEquals(HttpStatusCode.BadRequest,response.status)
+        }
+        repeat(21) { index ->
+            val response=client.get("/oauth/authorize") {
+                header("CF-Connecting-IP", "198.51.100.42")
+                url { parameters.append("invalid", index.toString()) }
+            }
+            assertEquals(if (index==20) HttpStatusCode.TooManyRequests else HttpStatusCode.BadRequest,response.status)
+        }
+    }
+
+    @Test fun `password change revokes other app and ChatGPT sessions`() = testApplication {
+        application { backendModule(settings,store) }
+        val account=user()
+        val otherSession=store.login(Credentials(account.email,"test-password-123"))
+        val oauth=store.issueOAuth(checkNotNull(store.authenticate(account.token)),settings.clientId,settings.resource)
+        val oauthAttempt=client.post("/api/v1/account/password") {
+            bearerAuth(oauth.accessToken);contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(PasswordChangeRequest("test-password-123","new-password-456")))
+        }
+        assertEquals(HttpStatusCode.Unauthorized,oauthAttempt.status)
+        val response=client.post("/api/v1/account/password") {
+            bearerAuth(account.token);contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(PasswordChangeRequest("test-password-123","new-password-456")))
+        }
+        assertEquals(HttpStatusCode.NoContent,response.status,response.bodyAsText())
+        assertNotNull(store.authenticate(account.token))
+        assertNull(store.authenticate(otherSession.token))
+        assertNull(store.authenticate(oauth.accessToken))
+        assertFailsWith<ApiFailure> { store.refreshOAuth(oauth.refreshToken,settings.clientId,settings.resource) }
+        assertNotNull(store.login(Credentials(account.email,"new-password-456")))
+    }
+
+    @Test fun `social account can add a password from its authenticated app session`() = testApplication {
+        application { backendModule(settings,store) }
+        val identity=store.socialIdentity("google","subject-${UUID.randomUUID()}","social-${UUID.randomUUID()}@http.test",null)
+        val account=store.newSession(identity)
+        pg.postgresDatabase.connection.use { c ->
+            c.prepareStatement("UPDATE sessions SET issued_at=now()-INTERVAL '11 minutes' WHERE token_hash=?").use {
+                it.setString(1,digest(account.token));assertEquals(1,it.executeUpdate())
             }
         }
+        val stale=client.post("/api/v1/account/password") {
+            bearerAuth(account.token);contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(PasswordChangeRequest("","social-password-456")))
+        }
+        assertEquals(HttpStatusCode.Unauthorized,stale.status)
+        assertFailsWith<ApiFailure> { store.login(Credentials(account.email,"social-password-456")) }
+        val fresh=store.newSession(identity)
+        val response=client.post("/api/v1/account/password") {
+            bearerAuth(fresh.token);contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(PasswordChangeRequest("","social-password-456")))
+        }
+        assertEquals(HttpStatusCode.NoContent,response.status,response.bodyAsText())
+        assertNotNull(store.login(Credentials(account.email,"social-password-456")))
     }
     @Test fun `REST denies anonymous users and isolates attachments`()=testApplication {
         application { backendModule(settings,store) }
@@ -412,6 +475,19 @@ class HttpIntegrationTest {
             "update_item", "complete_task", "mark_habit", "delete_item", "get_attachment",
         )
         assertEquals(publicTools, tools.map { it.jsonObject.getValue("name").jsonPrimitive.content }.toSet())
+        val malformedAttachmentId = callTool(allowed.accessToken, 13, "get_attachment", buildJsonObject { put("id", "not-a-uuid") })
+        assertTrue(malformedAttachmentId.getValue("isError").jsonPrimitive.boolean)
+        val malformedOperationId = callTool(allowed.accessToken, 14, "create_task", buildJsonObject {
+            put("operation_id", "not-a-uuid")
+            put("title", "Не должна появиться")
+        })
+        assertTrue(malformedOperationId.getValue("isError").jsonPrimitive.boolean)
+        assertTrue(store.list(owner.userId).none { (it.content as? TaskContent)?.title == "Не должна появиться" })
+        val malformedWeek = callTool(allowed.accessToken, 15, "get_week_review", buildJsonObject {
+            put("week_start", "вчера")
+            put("zone_id", "Europe/Moscow")
+        })
+        assertTrue(malformedWeek.getValue("isError").jsonPrimitive.boolean)
 
         val readOnly = store.issueOAuth(identity.copy(scopes = setOf("tracker:read")), plugin.clientId, plugin.resource)
         val readCatalog = rpc(readOnly.accessToken, listRequest)

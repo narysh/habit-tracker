@@ -81,6 +81,7 @@ val WireJson = Json { encodeDefaults = true; ignoreUnknownKeys = true; classDisc
 @Serializable data class SyncRequest(val mutations: List<Mutation> = emptyList(), val cursor: Long = 0)
 @Serializable data class SyncResponse(val results: List<MutationResult>, val changes: List<Item>, val nextCursor: Long, val hasMore: Boolean)
 @Serializable data class Credentials(val email: String, val password: String)
+@Serializable data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
 @Serializable data class Session(val token: String, val userId: String, val email: String, val expiresAt: String)
 @Serializable data class ApiError(val error: String)
 @Serializable data class Attachment(val id: String, val noteId: String, val name: String, val mediaType: String, val size: Long)

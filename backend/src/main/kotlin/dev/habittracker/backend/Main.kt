@@ -31,9 +31,9 @@ private val identityKey = AttributeKey<Identity>("identity")
 private val tokenKey = AttributeKey<String>("token")
 private fun ApplicationCall.rateLimitHost(settings: Settings): String {
     val peer = request.local.remoteHost
-    if (!settings.trustReverseProxy) return peer
-    val realIp = request.headers.getAll("X-Real-IP")?.singleOrNull() ?: return peer
-    if (realIp.length > 45) return peer
+    val header = settings.trustedClientIpHeader ?: return peer
+    val realIp = request.headers.getAll(header)?.singleOrNull()?.trim() ?: return peer
+    if (realIp.length > 45 || realIp.isEmpty()) return peer
     if (':' in realIp && realIp.all { it in "0123456789abcdefABCDEF:." }) {
         return runCatching { java.net.InetAddress.getByName(realIp).hostAddress }.getOrDefault(peer)
     }
@@ -95,7 +95,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 val identity = withContext(Dispatchers.IO) {
                     when {
                         settings.publicPlugin && path == "/mcp" -> store.authenticatePlugin(token, settings.clientId, settings.resource)
-                        else -> store.authenticate(token, appSessionOnly = settings.publicPlugin || path == "/api/v1/account/delete")
+                        else -> store.authenticate(token, appSessionOnly = settings.publicPlugin || path in setOf("/api/v1/account/delete", "/api/v1/account/password"))
                     }
                 }
                 if(identity == null) {
@@ -159,6 +159,14 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             }
             post("/logout") { withContext(Dispatchers.IO) { store.revoke(call.attributes[tokenKey]) }; call.respond(HttpStatusCode.NoContent) }
             post("/account/revoke-sessions") { withContext(Dispatchers.IO) { store.revokeAll(call.attributes[identityKey].userId) }; call.respond(HttpStatusCode.NoContent) }
+            post("/account/password") {
+                val request = call.receive<PasswordChangeRequest>()
+                val identity = call.attributes[identityKey]
+                withContext(Dispatchers.IO) {
+                    store.changePassword(identity.userId, call.attributes[tokenKey], request.currentPassword, request.newPassword)
+                }
+                call.respond(HttpStatusCode.NoContent)
+            }
             post("/account/delete") {
                 require(call.receive<AccountDeletionRequest>().confirmation == "DELETE") { "Подтверди удаление аккаунта" }
                 val userId = call.attributes[identityKey].userId
@@ -256,6 +264,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             putJsonArray("scopes_supported") { add("tracker:read"); add("tracker:write") }
         }) }
         get("/oauth/authorize") {
+            throttle.check(call.rateLimitHost(settings))
             val (nonce, request, appCode) = oauth.begin(call.request.queryParameters.entries().associate { it.key to it.value.single() })
             val appLink = if (appCode == null) "" else """
                 <section><h2>Подтвердить в Android</h2>

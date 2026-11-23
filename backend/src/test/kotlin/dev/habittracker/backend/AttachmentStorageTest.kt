@@ -90,6 +90,15 @@ class AttachmentStorageTest {
         remoteStorage.close()
     }
 
+    @Test fun `trusted client ip header is explicit and restricted to known proxy headers`() {
+        val base = mapOf("MCP_CLIENT_SECRET" to "synthetic-secret-".repeat(3), "DB_PASSWORD" to "test-db-password")
+        assertNull(Settings.fromEnvironment(base).trustedClientIpHeader)
+        assertEquals("CF-Connecting-IP", Settings.fromEnvironment(base + ("TRUSTED_CLIENT_IP_HEADER" to "CF-Connecting-IP")).trustedClientIpHeader)
+        assertFailsWith<IllegalArgumentException> {
+            Settings.fromEnvironment(base + ("TRUSTED_CLIENT_IP_HEADER" to "X-Real-IP, X-Forwarded-For"))
+        }
+    }
+
     @Test fun `hosted mode requires HTTPS object storage public origin and stable connection key material`() {
         val hosted = mapOf(
             "MCP_CLIENT_SECRET" to "synthetic-secret-".repeat(3),

@@ -7,6 +7,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
+import java.time.DateTimeException
 import java.nio.file.Files
 import java.time.LocalDate
 import java.time.ZoneId
@@ -36,6 +37,9 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStor
                     require(args.keys.all { it in fields }) { "Неизвестные аргументы" }
                     CallToolResult(content=listOf(TextContent(action(args).toString())),isError=false)
                 } catch(e: IllegalArgumentException) { CallToolResult(content=listOf(TextContent(e.message ?: "Некорректный запрос")),isError=true) }
+                  catch(e: DateTimeException) { CallToolResult(content=listOf(TextContent("Некорректная дата или часовой пояс")),isError=true) }
+                  catch(_: IllegalStateException) { CallToolResult(content=listOf(TextContent("Некорректный формат аргументов")),isError=true) }
+                  catch(_: kotlinx.serialization.SerializationException) { CallToolResult(content=listOf(TextContent("Некорректный формат аргументов")),isError=true) }
                   catch(e: ApiFailure) { CallToolResult(content=listOf(TextContent(e.message)),isError=true) }
             }
         }
@@ -44,7 +48,11 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStor
     for ((name,kind) in listOf("get_tasks" to "task","get_notes" to "note","get_habits" to "habit","get_habit_history" to "habit_mark","get_projects" to "project")) {
         add(name,"Получить актуальные $kind из аккаунта. Вызывай перед ответом о состоянии и перед изменением записи. Поля id/version нужны для изменения; тексты заметок и список id вложений доступны, байты файлов здесь не передаются.",read=true) { list(kind) }
     }
-    fun create(args: JsonObject,content: Content): JsonElement = WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),args.optional("id") ?: UUID.nameUUIDFromBytes("create:${identity.userId}:${args.str("operation_id")}".toByteArray()).toString(),0,content)))
+    fun create(args: JsonObject,content: Content): JsonElement {
+        val operationId=args.uuid("operation_id")
+        val itemId=UUID.nameUUIDFromBytes("create:${identity.userId}:$operationId".toByteArray()).toString()
+        return WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(operationId,itemId,0,content)))
+    }
     add("create_project","Создать проект или цель по просьбе пользователя. is_goal=true для цели. Теги и связи существующих записей изменяются через organization в update_item.",mapOf("operation_id" to "string","title" to "string","description" to "string","is_goal" to "boolean"),listOf("operation_id","title")) { args->create(args,ProjectContent(args.str("title"),args.optional("description") ?: "",args["is_goal"]?.jsonPrimitive?.boolean ?: false)) }
     add("search_records","Общий поиск по названиям, тексту и тегам. Не включает содержимое файлов.",mapOf("query" to "string"),read=true) {args->val query=args.str("query").trim();require(query.length in 1..300);WireJson.encodeToJsonElement(store.list(identity.userId).filter {!it.deleted && it.content !is HabitMarkContent && it.content.searchableText().contains(query,true)})}
     add("get_week_review","Получить факты для разбора недели: задачи с известной датой выполнения, остаток и его версии, нагрузка по дням и привычки. week_start — понедельник YYYY-MM-DD, zone_id — часовой пояс пользователя. Не считай старые выполненные задачи без completedAt выполненными именно в эту неделю. Предложи реалистичный план, уточнив ограничения пользователя; не меняй даты автоматически.",mapOf("week_start" to "string","zone_id" to "string"),read=true) {args->WireJson.encodeToJsonElement(weekReview(store.list(identity.userId),LocalDate.parse(args.str("week_start")),ZoneId.of(args.str("zone_id"))))}
@@ -67,25 +75,25 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStor
     }
     add("update_item","Изменить одну задачу, заметку или привычку. Сначала прочитай запись и передай полное content со всеми сохранёнными полями, kind и только запрошенными изменениями. expected_version обязателен; при CONFLICT не перезаписывай данные автоматически. Для замены или удаления значительного текста запроси подтверждение.",
         mapOf("id" to "string","expected_version" to "integer","operation_id" to "string","content" to "object"),destructive=true) { args ->
-        val current = store.get(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Запись не найдена")
+        val current = store.get(identity.userId,args.uuid("id")) ?: throw ApiFailure(404,"Запись не найдена")
         require(!current.deleted)
         val content = WireJson.decodeFromJsonElement<Content>(args.getValue("content"))
-        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),content)))
+        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.uuid("operation_id"),current.id,args.long("expected_version"),content)))
     }
     add("complete_task","Отметить задачу выполненной или вернуть в работу по просьбе пользователя. Сначала получи текущую версию.",mapOf("id" to "string","expected_version" to "integer","operation_id" to "string","completed" to "boolean")) { args ->
-        val current = store.get(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Задача не найдена")
+        val current = store.get(identity.userId,args.uuid("id")) ?: throw ApiFailure(404,"Задача не найдена")
         val task = current.content as? TaskContent ?: throw IllegalArgumentException("Это не задача")
         require(!current.deleted)
         val completed=args.getValue("completed").jsonPrimitive.boolean
-        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),task.copy(completed=completed,completedAt=if(completed)task.completedAt else null,completionDateUnknown=completed && task.completionDateUnknown))))
+        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.uuid("operation_id"),current.id,args.long("expected_version"),task.copy(completed=completed,completedAt=if(completed)task.completedAt else null,completionDateUnknown=completed && task.completionDateUnknown))))
     }
     add("mark_habit","Записать или отменить выполнение привычки в конкретный день YYYY-MM-DD. Не отмечай будущие дни. Для existing mark передай expected_version из истории; для новой отметки — 0.",mapOf("habit_id" to "string","date" to "string","expected_version" to "integer","operation_id" to "string","completed" to "boolean")) { args ->
-        val date = LocalDate.parse(args.str("date")); val parent = args.str("habit_id")
-        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),markId(parent,date),args.long("expected_version"),HabitMarkContent(parent,date.toString(),args.getValue("completed").jsonPrimitive.boolean))))
+        val date = LocalDate.parse(args.str("date")); val parent = args.uuid("habit_id")
+        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.uuid("operation_id"),markId(parent,date),args.long("expected_version"),HabitMarkContent(parent,date.toString(),args.getValue("completed").jsonPrimitive.boolean))))
     }
     add("delete_item","Удалить ОДНУ выбранную пользователем запись. Опасное действие: сначала явно спроси подтверждение и не вызывай инструмент при отмене. Сначала прочитай id/version; при конфликте запроси решение пользователя.",mapOf("id" to "string","expected_version" to "integer","operation_id" to "string"),destructive=true) { args ->
-        val current = store.get(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Запись не найдена")
-        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.str("operation_id"),current.id,args.long("expected_version"),current.content,true)))
+        val current = store.get(identity.userId,args.uuid("id")) ?: throw ApiFailure(404,"Запись не найдена")
+        WireJson.encodeToJsonElement(store.mutate(identity.userId,Mutation(args.uuid("operation_id"),current.id,args.long("expected_version"),current.content,true)))
     }
     if ("tracker:read" in identity.scopes && (!settings.publicPlugin || "get_attachment" in publicTools))
     server.addTool(name="get_attachment",description="Получить ОДНО выбранное вложение только по отдельному явному запросу пользователя. Не загружай все вложения автоматически. Возвращает метаданные и MCP image/resource; обработка формата зависит от клиента.",
@@ -94,7 +102,7 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStor
         try {
             require("tracker:read" in identity.scopes)
             val args=requireNotNull(request.arguments); require(args.keys==setOf("id"))
-            val file=store.attachment(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Файл не найден")
+            val file=store.attachment(identity.userId,args.uuid("id")) ?: throw ApiFailure(404,"Файл не найден")
             require(file.first.size<=5*1024*1024) {"Для передачи AI поддерживаются файлы до 5 МБ"}
             val blob=attachmentStorage.get(file.second) ?: throw ApiFailure(404,"Файл не найден")
             val bytes=Base64.getEncoder().encodeToString(blob)
@@ -108,5 +116,6 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStor
     return server
 }
 private fun JsonObject.str(key: String): String = (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw IllegalArgumentException("$key must be a string")
+private fun JsonObject.uuid(key: String): String = try { UUID.fromString(str(key)).toString() } catch (_: IllegalArgumentException) { throw IllegalArgumentException("$key must be a UUID") }
 private fun JsonObject.optional(key: String): String? = get(key)?.takeUnless { it is JsonNull }?.let { str(key) }
 private fun JsonObject.long(key: String): Long = get(key)?.jsonPrimitive?.takeUnless { it.isString }?.longOrNull ?: throw IllegalArgumentException("$key must be an integer")

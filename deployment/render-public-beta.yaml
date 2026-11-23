@@ -13,8 +13,8 @@ services:
     envVars:
       - key: HOSTED_MODE
         value: "true"
-      - key: TRUST_REVERSE_PROXY
-        value: "true"
+      - key: TRUSTED_CLIENT_IP_HEADER
+        value: CF-Connecting-IP
       - key: PUBLIC_CHATGPT_PLUGIN
         value: "true"
       - key: MCP_CLIENT_ID

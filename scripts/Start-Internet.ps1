@@ -19,9 +19,11 @@ function Test-Backend {
 }
 if(-not (Test-Backend)) {
     $script=Join-Path $PSScriptRoot 'Start-Backend.ps1'
-    Start-Process (Get-Command pwsh).Source -ArgumentList @('-NoProfile','-File',"`"$script`"") -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput .local/internet-server.out.log -RedirectStandardError .local/internet-server.err.log | Out-Null
+    $backendProcess=Start-Process (Get-Command pwsh).Source -ArgumentList @('-NoProfile','-File',"`"$script`"") -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput .local/internet-server.out.log -RedirectStandardError .local/internet-server.err.log
     $deadline=(Get-Date).AddSeconds(90)
     while(-not (Test-Backend)) {
+        $backendProcess.Refresh()
+        if($backendProcess.HasExited){throw "Backend launcher exited with code $($backendProcess.ExitCode). See .local/internet-server.*.log"}
         if((Get-Date)-gt $deadline){throw 'Backend startup timed out. See .local/internet-server.*.log'}
         Start-Sleep -Seconds 2
     }

@@ -59,6 +59,39 @@ class FeatureIntegrationTest {
             }
         }
     }
+    @Test fun unsavedEditorDraftSurvivesActivityRecreation() {
+        account()
+        val title = "Draft survives rotation ${UUID.randomUUID()}"
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Добавить").performClick()
+            compose.onNodeWithText("Задачу").performClick()
+            compose.onNodeWithText("Название").performTextInput(title)
+            compose.onNodeWithText("Описание").performTextInput("Текст, который ещё не сохранён")
+
+            scenario.recreate()
+
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Сохранить").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(title).assertExists()
+            compose.onNodeWithText("Текст, который ещё не сохранён").assertExists()
+            compose.onNodeWithText("Закрыть").performClick()
+            assertTrue(runBlocking(Dispatchers.IO) { app.repository()!!.dao.items().none {
+                (WireJson.decodeFromString<Item>(it.localJson).content as? TaskContent)?.title == title
+            } })
+        }
+    }
+    @Test fun passwordSettingsCanBeOpenedAndCancelled() {
+        account()
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Настройки").performClick()
+            compose.onNodeWithText("Изменить пароль").performClick()
+            compose.onNodeWithText("Текущий пароль, если есть").assertExists()
+            compose.onNodeWithText("Сохранить пароль").assertExists()
+            compose.onNodeWithText("Отмена").performClick()
+            compose.onNodeWithText("Настройки").assertExists()
+        }
+    }
     @Test fun taskLinkCreatesTaskWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
         val session = account()
         val repo = Repository(app, session, false)

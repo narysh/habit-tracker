@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,8 +52,23 @@ import java.time.format.ResolverStyle
 import java.time.temporal.ChronoUnit
 import java.util.Locale
 import java.util.UUID
+import kotlinx.serialization.Serializable
 
 private val mobileChatGptInstructions = """Когда я прошу добавить задачу, заметку или привычку в Habit Tracker, ответь одной Markdown-ссылкой «Добавить в Habit Tracker» на https://narysh.github.io/habit-tracker/task/#.... Для задачи укажи kind=task&title=...&description=...&date=ГГГГ-ММ-ДД&time=ЧЧ%3AММ; для заметки kind=note&title=...&text=...; для привычки kind=habit&title=...&description=...&days=2%2C4 для выбранных дней или target=3 для недельной цели. Дни нумеруются с понедельника: 1–7. Кодируй параметры URL-кодированием, не придумывай сроки, текст или расписание. Если данных не хватает, сначала задай вопрос. Не утверждай, что запись уже сохранена: она появится после нажатия ссылки и открытия Habit Tracker. Если ссылка не открывается, предложи «Поделиться → Habit Tracker»."""
+
+@Serializable private data class EditorDraftState(val id: String, val content: Content)
+private val editorDraftSaver = Saver<Pair<String, Content>?, String>(
+    save = { value -> value?.let { WireJson.encodeToString(EditorDraftState(it.first, it.second)) } },
+    restore = { value -> WireJson.decodeFromString<EditorDraftState>(value).let { draft -> draft.id to draft.content } },
+)
+private val organizationSaver = Saver<Organization, String>(
+    save = { value -> WireJson.encodeToString(value) },
+    restore = { value -> WireJson.decodeFromString<Organization>(value) },
+)
+private val habitDaysSaver = Saver<Set<Int>, String>(
+    save = { it.sorted().joinToString(",") },
+    restore = { value -> value.split(',').filter(String::isNotBlank).map(String::toInt).toSet() },
+)
 
 class MainActivity : ComponentActivity() {
     private fun receive(intent: Intent) {
@@ -120,6 +136,7 @@ private fun Content.description(): String = when(this) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var settings by remember { mutableStateOf(false) }
     var confirmAccountDeletion by remember { mutableStateOf(false) }
+    var changePasswordDialog by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
     var socialSettings by remember { mutableStateOf(false) }
     var chatGptLink by remember(session?.userId) { mutableStateOf(false) }
@@ -127,7 +144,7 @@ private fun Content.description(): String = when(this) {
     var feature by remember { mutableStateOf<String?>(null) }
     var more by remember { mutableStateOf(false) }
     var selectedPlan by remember { mutableStateOf<Item?>(null) }
-    var editor by remember { mutableStateOf<Pair<String,Content>?>(null) }
+    var editor by rememberSaveable(stateSaver = editorDraftSaver) { mutableStateOf<Pair<String,Content>?>(null) }
     var deleting by remember { mutableStateOf<Item?>(null) }
     var history by remember { mutableStateOf<Item?>(null) }
     var chooser by remember { mutableStateOf(false) }
@@ -243,6 +260,7 @@ private fun Content.description(): String = when(this) {
     deleting?.let { item -> AlertDialog(onDismissRequest={deleting=null},title={Text("Удалить «${item.content.title}»?")},text={Text("Удаление будет синхронизировано с аккаунтом.")},confirmButton={TextButton(onClick={vm.delete(item);deleting=null}) {Text("Удалить")}},dismissButton={TextButton(onClick={deleting=null}) {Text("Отмена")}}) }
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
+    if(changePasswordDialog) ChangePasswordDialog(vm,{changePasswordDialog=false})
     if(chatGptLink) session?.let { account -> ChatGptLinkDialog(vm, account) { chatGptLink=false } }
     if(mobileChatSetup) MobileChatGptSetupDialog { mobileChatSetup=false }
     if(connection) ConnectionDialog(vm) { connection=false }
@@ -268,7 +286,22 @@ private fun Content.description(): String = when(this) {
         }){Text("Разрешить уведомления")}},
         dismissButton={TextButton(onClick={notificationPermissionPrompt=false}){Text("Не сейчас")}}
     )
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={openNotificationSettings(context)}) {Text("Настройки уведомлений Android")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT через MCP")}; TextButton(onClick={settings=false;mobileChatSetup=true}) {Text("Настроить импорт из ChatGPT на телефоне")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;changePasswordDialog=true}) {Text("Изменить пароль")}; TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={openNotificationSettings(context)}) {Text("Настройки уведомлений Android")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT через MCP")}; TextButton(onClick={settings=false;mobileChatSetup=true}) {Text("Настроить импорт из ChatGPT на телефоне")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+}
+@Composable private fun ChangePasswordDialog(vm: AppViewModel,onClose: ()->Unit) {
+    var current by remember { mutableStateOf("") }
+    var fresh by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    val busy by vm.busy.collectAsStateWithLifecycle()
+    AlertDialog(onDismissRequest={if(!busy) onClose()},title={Text("Изменить пароль")},text={
+        Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text("Если аккаунт создан через Google, VK или Яндекс, оставь текущее поле пустым и задай пароль в течение 10 минут после входа. После сохранения другие сеансы и подключение ChatGPT потребуют повторного входа.",style=MaterialTheme.typography.bodySmall)
+            OutlinedTextField(current,{current=it},label={Text("Текущий пароль, если есть")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(fresh,{fresh=it},label={Text("Новый пароль — от 10 символов")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(confirm,{confirm=it},label={Text("Повтори новый пароль")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+            if(confirm.isNotEmpty() && fresh!=confirm) Text("Пароли не совпадают",color=MaterialTheme.colorScheme.error)
+        }
+    },confirmButton={TextButton(enabled=!busy && fresh.length>=10 && fresh.length<=128 && fresh==confirm,onClick={vm.changePassword(current,fresh,onClose)}) {Text(if(busy) "Сохраняю…" else "Сохранить пароль")}},dismissButton={TextButton(enabled=!busy,onClick=onClose){Text("Отмена")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
@@ -367,18 +400,18 @@ private fun Content.description(): String = when(this) {
     AlertDialog(onDismissRequest=close,title={Text("История: ${habit.title}")},text={LazyColumn(Modifier.heightIn(max=420.dp)) { items(count) { index -> val date=today.minusDays(index.toLong()); Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) { Text(date.format(dateFormat),Modifier.weight(1f)); if(habit.isDue(date)) Checkbox(date.toString() in marks,{mark(date,it)}) else Text("Выходной",style=MaterialTheme.typography.labelSmall) } } }},confirmButton={TextButton(onClick=close) {Text("Готово")}})
 }
 @Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit,notice: String? = null,onReminderSaved: ()->Unit = {}) {
-    var title by remember(id) { mutableStateOf(initial.title) }
-    var body by remember(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; is ProjectContent -> initial.description; else -> "" }) }
-    var date by remember(id) { mutableStateOf(localDate((initial as? TaskContent)?.dueDate)) }
-    var time by remember(id) { mutableStateOf((initial as? TaskContent)?.dueTime.orEmpty()) }
-    var reminder by remember(id) { mutableStateOf((initial as? TaskContent)?.reminderMinutes?.toString().orEmpty()) }
-    var mode by remember(id) { mutableStateOf((initial as? HabitContent)?.mode ?: HabitMode.WEEKDAYS) }
-    var days by remember(id) { mutableStateOf((initial as? HabitContent)?.weekdays ?: setOf(1,2,3,4,5,6,7)) }
-    var target by remember(id) { mutableStateOf(((initial as? HabitContent)?.targetPerWeek ?: 3).toString()) }
-    var starts by remember(id) { mutableStateOf(localDate((initial as? HabitContent)?.startsOn ?: LocalDate.now().toString())) }
-    var habitTime by remember(id) { mutableStateOf((initial as? HabitContent)?.reminderTime.orEmpty()) }
-    var organization by remember(id) { mutableStateOf(initial.organization) }
-    var goal by remember(id) { mutableStateOf((initial as? ProjectContent)?.isGoal ?: false) }
+    var title by rememberSaveable(id) { mutableStateOf(initial.title) }
+    var body by rememberSaveable(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; is ProjectContent -> initial.description; else -> "" }) }
+    var date by rememberSaveable(id) { mutableStateOf(localDate((initial as? TaskContent)?.dueDate)) }
+    var time by rememberSaveable(id) { mutableStateOf((initial as? TaskContent)?.dueTime.orEmpty()) }
+    var reminder by rememberSaveable(id) { mutableStateOf((initial as? TaskContent)?.reminderMinutes?.toString().orEmpty()) }
+    var mode by rememberSaveable(id) { mutableStateOf((initial as? HabitContent)?.mode ?: HabitMode.WEEKDAYS) }
+    var days by rememberSaveable(id, stateSaver = habitDaysSaver) { mutableStateOf((initial as? HabitContent)?.weekdays ?: setOf(1,2,3,4,5,6,7)) }
+    var target by rememberSaveable(id) { mutableStateOf(((initial as? HabitContent)?.targetPerWeek ?: 3).toString()) }
+    var starts by rememberSaveable(id) { mutableStateOf(localDate((initial as? HabitContent)?.startsOn ?: LocalDate.now().toString())) }
+    var habitTime by rememberSaveable(id) { mutableStateOf((initial as? HabitContent)?.reminderTime.orEmpty()) }
+    var organization by rememberSaveable(id, stateSaver = organizationSaver) { mutableStateOf(initial.organization) }
+    var goal by rememberSaveable(id) { mutableStateOf((initial as? ProjectContent)?.isGoal ?: false) }
     var error by remember { mutableStateOf<String?>(null) }
     val context=androidx.compose.ui.platform.LocalContext.current
     val currentItems by vm.items.collectAsStateWithLifecycle()
