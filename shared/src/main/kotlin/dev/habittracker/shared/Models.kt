@@ -122,6 +122,11 @@ fun Content.validate() {
         }
     }
 }
+
+/** Calendar day for date-only fields is fixed to the record's time zone, even while the device travels. */
+fun TaskContent.todayAt(instant: Instant): LocalDate = instant.atZone(ZoneId.of(zoneId)).toLocalDate()
+fun HabitContent.todayAt(instant: Instant): LocalDate = instant.atZone(ZoneId.of(zoneId)).toLocalDate()
+
 fun markId(habitId: String, date: LocalDate): String = UUID.nameUUIDFromBytes("habit:$habitId:$date".toByteArray(Charsets.UTF_8)).toString()
 fun Content.typeName(): String = when (this) { is TaskContent -> "task"; is NoteContent -> "note"; is HabitContent -> "habit"; is HabitMarkContent -> "habit_mark"; is ProjectContent->"project";is WeekPlanContent->"week_plan" }
 fun Content.withOrganization(value: Organization): Content=when(this){is TaskContent->copy(organization=value);is NoteContent->copy(organization=value);is HabitContent->copy(organization=value);else->this}

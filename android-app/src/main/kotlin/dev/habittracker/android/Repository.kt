@@ -259,7 +259,7 @@ class SyncWorker(context: Context,params: WorkerParameters) : CoroutineWorker(co
             app.repository()?.synchronize()
         }
         Result.success()
-    } catch(e: NetworkFailure) { if(e.status==401) Result.failure() else Result.retry() }
+    } catch(e: NetworkFailure) { if(isTransientHttpStatus(e.status)) Result.retry() else Result.failure() }
       catch(_: java.io.IOException) { Result.retry() }
       catch(_: IllegalArgumentException) { Result.failure() }
 }

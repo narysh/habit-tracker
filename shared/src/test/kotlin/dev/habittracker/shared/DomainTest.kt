@@ -1,6 +1,7 @@
 package dev.habittracker.shared
 
 import java.time.LocalDate
+import java.time.Instant
 import java.util.UUID
 import org.junit.jupiter.api.Test
 import kotlin.test.*
@@ -23,6 +24,17 @@ class DomainTest {
         val habit = UUID.randomUUID().toString(); val date = LocalDate.parse("2026-11-12")
         assertEquals(markId(habit,date),markId(habit,date))
         assertNotEquals(markId(habit,date),markId(UUID.randomUUID().toString(),date))
+    }
+    @Test fun `date-only task and habit days use their saved time zones`() {
+        val instant = Instant.parse("2026-11-23T22:30:00Z")
+        val task = TaskContent("Срок", zoneId="Europe/Moscow")
+        val habit = HabitContent("Бег", startsOn="2026-11-01", zoneId="America/Los_Angeles")
+        assertEquals(LocalDate.parse("2026-11-24"), task.todayAt(instant))
+        assertEquals(LocalDate.parse("2026-11-23"), habit.todayAt(instant))
+    }
+    @Test fun `sync retries transient server and throttling responses only`() {
+        listOf(408, 425, 429, 500, 502, 599).forEach { assertTrue(isTransientHttpStatus(it)) }
+        listOf(400, 401, 403, 404, 409, 422, 600).forEach { assertFalse(isTransientHttpStatus(it)) }
     }
     @Test fun `validation rejects ambiguous reminders bad schedules and malformed attachments`() {
         assertFails { TaskContent("Task",dueTime="12:00").validate() }

@@ -93,7 +93,7 @@ private fun Content.description(): String = when(this) {
     val lifecycle=LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(lifecycle,session?.userId) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while(true) { if(session!=null) vm.refreshFromServer() else vm.findServer(); delay(10_000) }
+            while(true) { if(session!=null) vm.refreshFromServer() else vm.findServer(); delay(60_000) }
         }
     }
     val records by vm.items.collectAsStateWithLifecycle()
@@ -121,7 +121,8 @@ private fun Content.description(): String = when(this) {
     var history by remember { mutableStateOf<Item?>(null) }
     var chooser by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    val now by produceState(LocalDate.now()) { while(true) { value=LocalDate.now(); kotlinx.coroutines.delay(30000) } }
+    val now by produceState(Instant.now()) { while(true) { value=Instant.now(); kotlinx.coroutines.delay(30000) } }
+    val deviceToday = now.atZone(ZoneId.systemDefault()).toLocalDate()
     val permission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(session?.userId) { if(session!=null && Build.VERSION.SDK_INT>=33) permission.launch(Manifest.permission.POST_NOTIFICATIONS) }
     val incoming by vm.app.shareInbox.drafts.collectAsStateWithLifecycle()
@@ -147,13 +148,13 @@ private fun Content.description(): String = when(this) {
     fun newItem(kind: Int) {
         editor=UUID.randomUUID().toString() to when(kind) {
             1 -> TaskContent("",zoneId=ZoneId.systemDefault().id)
-            2 -> HabitContent("",startsOn=now.toString(),zoneId=ZoneId.systemDefault().id)
+            2 -> HabitContent("",startsOn=deviceToday.toString(),zoneId=ZoneId.systemDefault().id)
             else -> NoteContent("")
         }
     }
     Scaffold(
         snackbarHost={ SnackbarHost(snackbar) },
-        topBar={ if(session!=null) TopAppBar(title={ Column { Text(if(tab==0) "Сегодня" else listOf("Сегодня","Задачи","Привычки","Заметки")[tab],fontWeight=FontWeight.Bold); Text(now.format(DateTimeFormatter.ofPattern("d MMMM, EEEE",Locale.forLanguageTag("ru"))),style=MaterialTheme.typography.labelMedium) } },actions={ IconButton(onClick={vm.synchronize()},enabled=!busy) { Icon(Icons.Outlined.Sync,"Синхронизировать") }; IconButton(onClick={more=true}) { Icon(Icons.Outlined.MoreVert,"Возможности") }; DropdownMenu(more,{more=false}) { listOf("quick" to "Быстрый ввод","week" to "План недели","search" to "Поиск и фильтры","projects" to "Проекты и цели","stats" to "Статистика привычек","review" to "Разбор недели с AI","backup" to "Резервные копии","reminders" to "Напоминания").forEach { (id,label)->DropdownMenuItem(text={Text(label)},onClick={feature=id;more=false}) } }; IconButton(onClick={settings=true}) { Icon(Icons.Outlined.Settings,"Настройки") } }) },
+        topBar={ if(session!=null) TopAppBar(title={ Column { Text(if(tab==0) "Сегодня" else listOf("Сегодня","Задачи","Привычки","Заметки")[tab],fontWeight=FontWeight.Bold); Text(deviceToday.format(DateTimeFormatter.ofPattern("d MMMM, EEEE",Locale.forLanguageTag("ru"))),style=MaterialTheme.typography.labelMedium) } },actions={ IconButton(onClick={vm.synchronize()},enabled=!busy) { Icon(Icons.Outlined.Sync,"Синхронизировать") }; IconButton(onClick={more=true}) { Icon(Icons.Outlined.MoreVert,"Возможности") }; DropdownMenu(more,{more=false}) { listOf("quick" to "Быстрый ввод","week" to "План недели","search" to "Поиск и фильтры","projects" to "Проекты и цели","stats" to "Статистика привычек","review" to "Разбор недели с AI","backup" to "Резервные копии","reminders" to "Напоминания").forEach { (id,label)->DropdownMenuItem(text={Text(label)},onClick={feature=id;more=false}) } }; IconButton(onClick={settings=true}) { Icon(Icons.Outlined.Settings,"Настройки") } }) },
         bottomBar={ if(session!=null) NavigationBar { listOf("Сегодня","Задачи","Привычки","Заметки").forEachIndexed { index,label ->
             NavigationBarItem(selected=tab==index,onClick={tab=index},icon={ Icon(listOf(Icons.Outlined.Today,Icons.Outlined.Checklist,Icons.Outlined.Loop,Icons.Outlined.Notes)[index],label) },label={Text(label)})
         } } },
@@ -176,12 +177,12 @@ private fun Content.description(): String = when(this) {
                 } }
                 item { Row { TextButton(onClick={feature="quick"}) {Text("Быстрый ввод")}; TextButton(onClick={feature="week"}) {Text("План недели")} } }
                 item { SectionTitle("На сегодня") }
-                val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && (task.dueDate==null || LocalDate.parse(task.dueDate)<=now) }
+                val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && (task.dueDate==null || LocalDate.parse(task.dueDate)<=task.todayAt(now)) }
                 if(todayTasks.isEmpty()) item { EmptyState("Нет незавершённых задач на сегодня") }
                 items(todayTasks,key={it.id}) { item -> TaskCard(item,{vm.complete(item,it)},{editor=item.id to item.content},{deleting=item}) }
                 item { SectionTitle("Привычки") }
-                if(habits.none { (it.content as HabitContent).isDue(now) }) item {EmptyState("Нет привычек на сегодня")}
-                items(habits.filter { (it.content as HabitContent).isDue(now) },key={it.id}) { item -> HabitCard(item,visible,now,{vm.mark(item,now,it)},{editor=item.id to item.content},{deleting=item},{history=item}) }
+                if(habits.none { val habit=it.content as HabitContent; habit.isDue(habit.todayAt(now)) }) item {EmptyState("Нет привычек на сегодня")}
+                items(habits.filter { val habit=it.content as HabitContent; habit.isDue(habit.todayAt(now)) },key={it.id}) { item -> HabitCard(item,visible,now,{date,checked->vm.mark(item,date,checked)},{editor=item.id to item.content},{deleting=item},{history=item}) }
             }
             if(tab==1) {
                 if(tasks.isEmpty()) item { EmptyState("Пока нет задач. Добавь первую с помощью +") }
@@ -189,7 +190,7 @@ private fun Content.description(): String = when(this) {
             }
             if(tab==2) {
                 if(habits.isEmpty()) item { EmptyState("Начни с одной небольшой привычки") }
-                items(habits,key={it.id}) { item -> HabitCard(item,visible,now,{vm.mark(item,now,it)},{editor=item.id to item.content},{deleting=item},{history=item}) }
+                items(habits,key={it.id}) { item -> HabitCard(item,visible,now,{date,checked->vm.mark(item,date,checked)},{editor=item.id to item.content},{deleting=item},{history=item}) }
             }
             if(tab==3) {
                 item { OutlinedTextField(query,{query=it},label={Text("Найти заметку")},singleLine=true,modifier=Modifier.fillMaxWidth(),leadingIcon={Icon(Icons.Outlined.Search,null)}) }
@@ -307,11 +308,12 @@ private fun Content.description(): String = when(this) {
         IconButton(onClick=delete) { Icon(Icons.Outlined.Delete,"Удалить задачу") }
     } }
 }
-@Composable private fun HabitCard(item: Item,items: List<Item>,today: LocalDate,mark: (Boolean)->Unit,edit: ()->Unit,delete: ()->Unit,history: ()->Unit) {
+@Composable private fun HabitCard(item: Item,items: List<Item>,now: Instant,mark: (LocalDate,Boolean)->Unit,edit: ()->Unit,delete: ()->Unit,history: ()->Unit) {
     val habit=item.content as HabitContent
+    val today=habit.todayAt(now)
     val marks=items.mapNotNull { (it.content as? HabitMarkContent)?.takeIf { it.habitId==item.id && it.completed }?.date?.let(LocalDate::parse) }.toSet()
     Card { Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment=Alignment.CenterVertically) { Column(Modifier.weight(1f).clickable(onClick=edit)) { Text(habit.title,fontWeight=FontWeight.Bold); Text(if(habit.mode==HabitMode.WEEKLY_TARGET) "${habit.weekProgress(today,marks)} из ${habit.targetPerWeek} дней на неделе" else habit.weekdays.sorted().joinToString(" · ") { listOf("Пн","Вт","Ср","Чт","Пт","Сб","Вс")[it-1] },style=MaterialTheme.typography.bodySmall) }; Checkbox(today in marks,if(habit.isDue(today)) mark else null) }
+        Row(verticalAlignment=Alignment.CenterVertically) { Column(Modifier.weight(1f).clickable(onClick=edit)) { Text(habit.title,fontWeight=FontWeight.Bold); Text(if(habit.mode==HabitMode.WEEKLY_TARGET) "${habit.weekProgress(today,marks)} из ${habit.targetPerWeek} дней на неделе" else habit.weekdays.sorted().joinToString(" · ") { listOf("Пн","Вт","Ср","Чт","Пт","Сб","Вс")[it-1] },style=MaterialTheme.typography.bodySmall) }; Checkbox(today in marks,if(habit.isDue(today)) { checked -> mark(today,checked) } else null) }
         Row(verticalAlignment=Alignment.CenterVertically) { Text("Серия: ${habit.streak(today,marks)} ${if(habit.mode==HabitMode.WEEKLY_TARGET) "нед." else "вып."}",modifier=Modifier.weight(1f),style=MaterialTheme.typography.labelMedium); TextButton(onClick=history) {Text("История")}; IconButton(onClick=delete) {Icon(Icons.Outlined.Delete,"Удалить привычку")} }
     } }
 }
@@ -327,8 +329,9 @@ private fun Content.description(): String = when(this) {
         }},confirmButton={TextButton(onClick={resolve(true);open=false}) {Text("Оставить телефон")}},dismissButton={TextButton(onClick={resolve(false);open=false}) {Text("Оставить сервер")}})
     }
 }
-@Composable private fun HabitHistory(item: Item,items: List<Item>,today: LocalDate,mark: (LocalDate,Boolean)->Unit,close: ()->Unit) {
+@Composable private fun HabitHistory(item: Item,items: List<Item>,now: Instant,mark: (LocalDate,Boolean)->Unit,close: ()->Unit) {
     val habit=item.content as HabitContent
+    val today=habit.todayAt(now)
     val marks=items.mapNotNull { (it.content as? HabitMarkContent)?.takeIf { it.habitId==item.id && it.completed }?.date }.toSet()
     val count=(ChronoUnit.DAYS.between(LocalDate.parse(habit.startsOn),today)+1).coerceIn(0,100000).toInt()
     AlertDialog(onDismissRequest=close,title={Text("История: ${habit.title}")},text={LazyColumn(Modifier.heightIn(max=420.dp)) { items(count) { index -> val date=today.minusDays(index.toLong()); Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) { Text(date.format(dateFormat),Modifier.weight(1f)); if(habit.isDue(date)) Checkbox(date.toString() in marks,{mark(date,it)}) else Text("Выходной",style=MaterialTheme.typography.labelSmall) } } }},confirmButton={TextButton(onClick=close) {Text("Готово")}})
