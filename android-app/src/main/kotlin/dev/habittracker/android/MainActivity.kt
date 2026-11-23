@@ -399,7 +399,7 @@ private fun Content.description(): String = when(this) {
         title = { Text("Импорт из ChatGPT на телефоне") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Мобильное приложение ChatGPT пока не подключает MCP. Можно настроить один раз: скопируй инструкцию, вставь её в ChatGPT → Настройки → Пользовательские инструкции. После этого ChatGPT будет добавлять ссылки для задач и заметок в любом чате.")
+                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. Когда ChatGPT сформулирует задачу или заметку, выбери в меню ответа «Поделиться → Habit Tracker» — запись сразу появится в приложении.")
                 Text("В мобильном ChatGPT выбери «Поделиться → Habit Tracker». Если ответ начинается с «Задача:» или «Заметка:», запись появится сразу после отправки. Старые ссылки открывают черновик для проверки.", style = MaterialTheme.typography.bodySmall)
                 Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
