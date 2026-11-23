@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m py_compile scripts/test_public_plugin.py
+      - name: Validate ChatGPT plugin package metadata
+        run: pwsh -File scripts/Test-ChatGPT-PluginPackage.ps1
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

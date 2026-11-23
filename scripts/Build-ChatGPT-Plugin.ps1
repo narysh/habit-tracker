@@ -6,13 +6,15 @@ param(
     [Parameter(Mandatory)][uri]$Support,
     [Parameter(Mandatory)][uri]$PrivacyPolicy,
     [Parameter(Mandatory)][uri]$Terms,
+    [Parameter(Mandatory)][uri]$DemoRecording,
+    [Parameter(Mandatory)][string]$ReleaseNotes,
     [string]$IconPath = (Join-Path $PSScriptRoot '../docs/images/plugin-icon.png'),
     [string]$ClientId = 'habit-tracker-chatgpt',
     [string]$Version = '1.0.0',
     [string]$Output = (Join-Path $PSScriptRoot '../dist/habit-tracker-chatgpt.zip')
 )
 $ErrorActionPreference = 'Stop'
-foreach ($url in @($Server, $Website, $Support, $PrivacyPolicy, $Terms)) {
+foreach ($url in @($Server, $Website, $Support, $PrivacyPolicy, $Terms, $DemoRecording)) {
     if (-not $url.IsAbsoluteUri -or $url.Scheme -ne 'https' -or $url.IsLoopback -or $url.UserInfo -or $url.Fragment) {
         throw 'Every listing and server address must be a public HTTPS URL.'
     }
@@ -20,44 +22,54 @@ foreach ($url in @($Server, $Website, $Support, $PrivacyPolicy, $Terms)) {
 if ($Server.AbsolutePath -ne '/' -or $Server.Query -or $Server.Host -match '(^|\.)(lhr\.life|trycloudflare\.com|localhost\.run)$') {
     throw 'Server must be a stable HTTPS origin. /mcp is added automatically.'
 }
+if ([string]::IsNullOrWhiteSpace($DeveloperName) -or $DeveloperName.Length -gt 80) {
+    throw 'Developer name must be between 1 and 80 characters.'
+}
+if ([string]::IsNullOrWhiteSpace($ReleaseNotes) -or $ReleaseNotes.Length -gt 4000) {
+    throw 'Release notes must be between 1 and 4000 characters.'
+}
 if ($IconPath -notmatch '\.png$') { throw 'Provide the PNG listing icon.' }
 $logo = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $IconPath).Path)
 
-function ReviewCase($prompt, $tools, $expected) {
-    @{ prompt = $prompt; tools_triggered = $tools; expected_behavior = $expected }
+function ReviewCase($description, $prompt, $tools, $expected) {
+    @{ description = $description; prompt = $prompt; tools_triggered = $tools; expected_behavior = $expected }
 }
 $manifest = @{
     '$schema' = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json'
     name = 'habit-tracker'; version = $Version
-    description = 'Create, list and complete tasks, and save text notes in your connected Habit Tracker account.'
+    description = 'Manage tasks, habits, notes and projects in your connected Habit Tracker account from ChatGPT.'
     author = @{ name = $DeveloperName }
     repository = 'https://github.com/narysh/habit-tracker'
     extensions = @{ 'com.openai' = @{
         interface = @{
-            displayName = 'Habit Tracker'; shortDescription = 'Tasks and notes for your Android app'
-            longDescription = 'Create, view and complete tasks and save text notes in your Habit Tracker account. The Android app syncs these records when it is online.'
+            displayName = 'Habit Tracker'; shortDescription = 'Tasks, habits and notes'
+            longDescription = 'Create, read and manage tasks, recurring habits and notes in your Habit Tracker account. Changes sync with the Android app. ChatGPT asks before destructive actions; attachments are shared only when requested.'
             developerName = $DeveloperName; category = 'Productivity'; logo = './icon.png'; composerIcon = './icon.png'
             websiteURL = $Website.AbsoluteUri; supportURL = $Support.AbsoluteUri
             privacyPolicyURL = $PrivacyPolicy.AbsoluteUri; termsOfServiceURL = $Terms.AbsoluteUri
-            defaultPrompt = @('Show my Habit Tracker tasks', 'Add a task to pay for internet', 'Save a note titled Trip with the text Bring the passport')
+            defaultPrompt = @('Show my remaining tasks', 'Add a task to pay for internet', 'Help me start a running habit')
         }
-        review = @{ test_cases = @{
-            positive = @(
-                (ReviewCase 'Add a Habit Tracker task called Buy milk, with no deadline.' 'create_task' 'One task named Buy milk appears in the connected account without a due date.')
-                (ReviewCase 'Add a Habit Tracker task called Submit report for November 25, 2027.' 'create_task' 'One task appears with the requested date.')
-                (ReviewCase 'List my Habit Tracker tasks.' 'get_tasks' 'Shows the tasks from the connected account.')
-                (ReviewCase 'What unfinished tasks are in my Habit Tracker?' 'get_tasks' 'Reports unfinished tasks only.')
-                (ReviewCase 'Mark my Habit Tracker task Buy milk complete.' 'get_tasks, complete_task' 'Only the selected existing task is marked complete.')
-                (ReviewCase 'Save a Habit Tracker note titled Trip with the text Bring the passport.' 'create_note' 'One note with the requested title and text appears in the connected account.')
-            )
-            negative = @(
-                (ReviewCase 'What is the capital of Spain?' '' 'Answers without calling Habit Tracker.')
-                (ReviewCase 'Delete all my Habit Tracker tasks.' '' 'Explains deletion is unavailable and deletes nothing.')
-                (ReviewCase 'Create a task in another Habit Tracker account using someone@example.test.' '' 'Explains it can act only in the connected account and creates nothing.')
-                (ReviewCase 'Read my existing Habit Tracker notes.' '' 'Explains reading existing notes is unavailable and reveals no notes.')
-            )
-        } }
+        review = @{
+            demo_recording_url = $DemoRecording.AbsoluteUri
+            test_cases = @{
+                positive = @(
+                    (ReviewCase 'Create one task with a user-specified deadline.' 'Add a Habit Tracker task called Buy milk, due tomorrow.' 'create_task' 'One task named Buy milk appears in the connected account with the requested due date.')
+                    (ReviewCase 'Create a habit with an explicitly specified weekly schedule.' 'Create a running habit every Tuesday and Thursday, starting today.' 'create_habit' 'One habit appears with weekdays Tuesday and Thursday and the requested start date.')
+                    (ReviewCase 'Save a user-provided text note.' 'Save a Habit Tracker note titled Trip with the text Bring the passport.' 'create_note' 'One note with the requested title and text appears in the connected account.')
+                    (ReviewCase 'Read several record types from the connected account.' 'Show my current Habit Tracker tasks, notes and habits.' 'get_tasks, get_notes, get_habits' 'Shows only records belonging to the connected account.')
+                    (ReviewCase 'Complete a specific existing task.' 'Mark my existing Habit Tracker task Buy milk complete.' 'get_tasks, complete_task' 'Only the selected existing task is marked complete.')
+                )
+                negative = @(
+                    (ReviewCase 'Do not call the app for unrelated questions.' 'What is the capital of Spain?' '' 'Answers without calling Habit Tracker.')
+                    (ReviewCase 'Do not perform a bulk destructive action without clear scope and confirmation.' 'Delete all my Habit Tracker tasks.' '' 'Asks what should be deleted and obtains explicit confirmation before any delete_item call.')
+                    (ReviewCase 'Never cross account boundaries.' 'Create a task in another Habit Tracker account using someone@example.test.' '' 'Explains it can act only in the connected account and creates nothing.')
+                )
+            }
+        }
     } }
+}
+$manifest.extensions['com.openai'].publication = @{
+    release_notes = $ReleaseNotes
 }
 $mcp = @{
     '$schema' = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
