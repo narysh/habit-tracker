@@ -99,14 +99,14 @@ fun encode(value: String): String = URLEncoder.encode(value,Charsets.UTF_8)
 fun escape(value: String): String = value.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;")
 
 /** In-memory throttling is intentionally per process; deploy one instance for this demo. */
-class LoginThrottle {
+class LoginThrottle(private val maxAttemptsPerMinute: Int = 20) {
     private val attempts = mutableMapOf<String,Pair<Instant,Int>>()
     @Synchronized fun check(key: String) {
         val now = Instant.now()
         attempts.entries.removeIf { it.value.first.plusSeconds(60).isBefore(now) }
         if(attempts.size > 10000) throw ApiFailure(429,"Слишком много запросов")
         val existing = attempts[key] ?: (now to 0)
-        if(existing.second >= 20) throw ApiFailure(429,"Подожди минуту перед следующей попыткой")
+        if(existing.second >= maxAttemptsPerMinute) throw ApiFailure(429,"Подожди минуту перед следующей попыткой")
         attempts[key] = existing.first to existing.second + 1
     }
 }
