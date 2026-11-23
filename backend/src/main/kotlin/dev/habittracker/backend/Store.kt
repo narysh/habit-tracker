@@ -167,8 +167,15 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             statement.executeQuery().use { it.next() }
         }
     }
-    fun purgeDeletedAccountFiles(directory: Path): Int = tx { c -> purgeAccountFiles(c, directory) }
+    fun purgeDeletedAccountFiles(storage: AttachmentStorage): Int = tx { c -> purgeAccountFiles(c, storage) }
     fun queueUnlinkedAttachmentFiles(): Int = tx { c -> queueUnlinkedAttachmentFiles(c) }
+    fun queueAttachmentCleanup(storageKey: String) = tx { c ->
+        require(UUID.fromString(storageKey).toString() == storageKey)
+        c.prepareStatement("INSERT INTO account_file_purge(storage_key) VALUES (?) ON CONFLICT DO NOTHING").use {
+            it.setString(1, storageKey)
+            it.executeUpdate()
+        }
+    }
 
     private fun issueOAuth(c: Connection,identity: Identity,clientId: String,resource: String): OAuthTokens {
         lockAccount(c, identity.userId)

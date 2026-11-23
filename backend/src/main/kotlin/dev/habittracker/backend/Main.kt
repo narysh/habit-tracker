@@ -3,6 +3,7 @@ package dev.habittracker.backend
 import dev.habittracker.shared.*
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
@@ -22,7 +23,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import java.net.URI
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.sql.SQLException
 import java.util.UUID
@@ -50,15 +50,16 @@ fun main() {
 fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store)) {
     val logger = environment.log
     val oauth = AccountOAuth(settings,store)
-    val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"))
+    val attachmentStorage = settings.createAttachmentStorage()
+    val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"),settings.connectionKeyMaterial)
     val throttle = LoginThrottle()
     val linkThrottle = LoginThrottle()
-    Files.createDirectories(settings.files)
+    monitor.subscribe(ApplicationStopped) { attachmentStorage.close() }
     launch(Dispatchers.IO) {
         while (isActive) {
             try {
                 val queued = store.queueUnlinkedAttachmentFiles()
-                val attempted = store.purgeDeletedAccountFiles(settings.files)
+                val attempted = store.purgeDeletedAccountFiles(attachmentStorage)
                 if (queued == 64 || attempted == 64) continue
             } catch (_: SQLException) {
                 logger.warn("Unlinked attachment cleanup paused until the database is available")
@@ -113,7 +114,9 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             call.respondText(challenge, ContentType.Text.Plain)
         }
         get("/connection/proof") {
-            val publicAddress=System.getenv("ANDROID_PUBLIC_URL")?.takeIf { it.isNotBlank() } ?: runCatching { Files.readString(java.nio.file.Path.of(".local/backend-public-url.txt")).trim() }.getOrDefault("")
+            val publicAddress=settings.androidPublicUrl ?: if (!settings.hostedMode) {
+                runCatching { Files.readString(java.nio.file.Path.of(".local/backend-public-url.txt")).trim() }.getOrDefault("")
+            } else ""
             require(URI(publicAddress).scheme=="https") { "Публичный адрес ещё не опубликован" }
             call.respond(connectionIdentity.proof(publicAddress,call.request.queryParameters["nonce"].orEmpty()))
         }
@@ -124,7 +127,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         }
         get("/health") { call.respond(buildJsonObject { put("status","ok"); put("stage","backend") }) }
         get("/readyz") {
-            val ready = withContext(Dispatchers.IO) { Files.isWritable(settings.files) && store.databaseAvailable() }
+            val ready = withContext(Dispatchers.IO) { attachmentStorage.check() && store.databaseAvailable() }
             call.respond(if (ready) HttpStatusCode.OK else HttpStatusCode.ServiceUnavailable, buildJsonObject {
                 put("status", if (ready) "ok" else "unavailable")
             })
@@ -219,14 +222,16 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 val bytes = call.receive<ByteArray>()
                 require(bytes.size <= 20*1024*1024)
                 val key = UUID.randomUUID().toString()
-                val target = settings.files.resolve(key)
                 withContext(Dispatchers.IO) {
-                    Files.write(target,bytes)
+                    attachmentStorage.put(key,bytes)
                     try {
                         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
                         val savedKey = store.saveAttachment(userId,Attachment(id,noteId,name,mime,bytes.size.toLong()),key,hash)
-                        if(savedKey != key) Files.deleteIfExists(target)
-                    } catch(e: Throwable) { Files.deleteIfExists(target); throw e }
+                        if(savedKey != key && !attachmentStorage.delete(key)) runCatching { store.queueAttachmentCleanup(key) }
+                    } catch(e: Throwable) {
+                        if (!attachmentStorage.delete(key)) runCatching { store.queueAttachmentCleanup(key) }
+                        throw e
+                    }
                 }
                 call.respond(Attachment(id,noteId,name,mime,bytes.size.toLong()))
             }
@@ -234,7 +239,8 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 val id = call.parameters["id"].orEmpty(); UUID.fromString(id)
                 val file = withContext(Dispatchers.IO) { store.attachment(call.attributes[identityKey].userId,id) } ?: throw ApiFailure(404,"Файл не найден")
                 call.response.header(HttpHeaders.ContentDisposition,"attachment; filename*=UTF-8''${encode(file.first.name)}")
-                call.respondFile(settings.files.resolve(file.second).toFile())
+                val bytes = withContext(Dispatchers.IO) { attachmentStorage.get(file.second) } ?: throw ApiFailure(404,"Файл не найден")
+                call.respondBytes(bytes, ContentType.parse(file.first.mediaType))
             }
         }
         get("/.well-known/oauth-protected-resource") { call.respond(buildJsonObject {
@@ -298,7 +304,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
         }
     }
     mcpStatelessStreamableHttp(path="/mcp",allowedHosts=listOf(URI(settings.publicUrl).host,"localhost","127.0.0.1"),allowedOrigins=listOf(settings.publicUrl,"https://chatgpt.com")) {
-        mainMcp(store,call.attributes[identityKey],settings)
+        mainMcp(store,call.attributes[identityKey],settings,attachmentStorage)
     }
 }
 

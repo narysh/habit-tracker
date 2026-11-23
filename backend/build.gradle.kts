@@ -3,6 +3,8 @@ kotlin { jvmToolchain(21) }
 application { mainClass.set("dev.habittracker.backend.MainKt") }
 dependencies {
     implementation(project(":shared"))
+    implementation(platform("software.amazon.awssdk:bom:2.59.7"))
+    implementation("software.amazon.awssdk:s3")
     implementation("io.ktor:ktor-server-netty:3.5.2")
     implementation("io.ktor:ktor-server-content-negotiation:3.5.2")
     implementation("io.ktor:ktor-server-status-pages:3.5.2")

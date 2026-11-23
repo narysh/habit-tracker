@@ -84,7 +84,7 @@ class Api(private val baseUrl: String,private val token: () -> String? = { null 
     init { val uri = URI(baseUrl); require(uri.scheme in setOf("http","https") && uri.host != null && uri.userInfo == null && uri.query == null && uri.fragment == null) { "Некорректный адрес сервера" } }
     fun request(path: String,method: String="GET",body: ByteArray?=null,mediaType: String="application/json"): ByteArray {
         val connection = URL(baseUrl.trimEnd('/')+path).openConnection() as HttpURLConnection
-        connection.connectTimeout=10000; connection.readTimeout=20000; connection.requestMethod=method
+        connection.connectTimeout=15000; connection.readTimeout=90000; connection.requestMethod=method
         connection.instanceFollowRedirects=false
         connection.setRequestProperty("Accept","application/json")
         token()?.let { connection.setRequestProperty("Authorization","Bearer $it") }

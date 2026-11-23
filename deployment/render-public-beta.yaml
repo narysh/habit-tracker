@@ -1,0 +1,43 @@
+# Low-traffic public beta only. Render Free sleeps and is not a production SLA.
+# Keep the database, attachments, and connection identity outside the container.
+services:
+  - type: web
+    name: habit-tracker-free-beta
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    healthCheckPath: /readyz
+    envVars:
+      - key: HOSTED_MODE
+        value: "true"
+      - key: TRUST_REVERSE_PROXY
+        value: "true"
+      - key: PUBLIC_CHATGPT_PLUGIN
+        value: "true"
+      - key: MCP_CLIENT_ID
+        value: habit-tracker-chatgpt
+      - key: MCP_CLIENT_SECRET
+        generateValue: true
+      - key: MCP_REDIRECT_URIS
+        value: https://chatgpt.com/connector_platform_oauth_redirect
+      - key: DATABASE_URL
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: CONNECTION_PRIVATE_KEY_BASE64
+        sync: false
+      - key: CONNECTION_PUBLIC_KEY_BASE64
+        sync: false
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:MaxRAMPercentage=50 -XX:ActiveProcessorCount=2

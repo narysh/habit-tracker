@@ -9,6 +9,7 @@ import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.util.Base64
 import java.util.UUID
 import kotlin.test.*
 
@@ -110,6 +111,27 @@ class SocialLoginTest {
         assertFalse(ConnectionTrust.verify(proof,"https://attacker.test",nonce,identity.publicKey))
         assertFalse(ConnectionTrust.verify(proof,url,secret(),identity.publicKey))
         assertFalse(ConnectionTrust.verify(proof,url,nonce,ConnectionIdentity(Files.createTempDirectory("other-key")).publicKey))
+    }
+    @Test fun `hosted connection identity uses the configured stable key pair without local files`() {
+        val source=Files.createTempDirectory("identity-source")
+        val sourceIdentity=ConnectionIdentity(source)
+        val material=ConnectionKeyMaterial(
+            Base64.getEncoder().encodeToString(Files.readAllBytes(source.resolve("private.der"))),
+            sourceIdentity.publicKey,
+        )
+        val ephemeral=source.resolve("ephemeral-container-files")
+        val hosted=ConnectionIdentity(ephemeral,material)
+        val restarted=ConnectionIdentity(ephemeral,material)
+        val nonce=secret();val url="https://server.test"
+        assertFalse(Files.exists(ephemeral))
+        assertEquals(sourceIdentity.publicKey,hosted.publicKey)
+        assertEquals(hosted.publicKey,restarted.publicKey)
+        assertTrue(ConnectionTrust.verify(hosted.proof(url,nonce),url,nonce,hosted.publicKey))
+        val other=ConnectionIdentity(Files.createTempDirectory("identity-other"))
+        assertFailsWith<IllegalArgumentException> {
+            ConnectionIdentity(ephemeral,material.copy(publicKeyBase64=other.publicKey))
+        }
+        assertFalse(material.toString().contains(material.privateKeyBase64))
     }
     @Test fun `link callback requires the original session to remain valid`() {
         val account=store.register(Credentials("${UUID.randomUUID()}@social.test","test-password-123"))

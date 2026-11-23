@@ -17,8 +17,20 @@ data class Settings(
     val publicPlugin: Boolean = false,
     val openAiDomainChallenge: String? = null,
     val trustReverseProxy: Boolean = false,
+    val s3Storage: S3StorageConfig? = null,
+    val hostedMode: Boolean = false,
+    val androidPublicUrl: String? = null,
+    val connectionKeyMaterial: ConnectionKeyMaterial? = null,
 ) {
     val resource get() = "$publicUrl/mcp"
+    fun createAttachmentStorage(): AttachmentStorage =
+        s3Storage?.let { S3AttachmentStorage(it) } ?: LocalFilesystemAttachmentStorage(files)
+
+    override fun toString(): String = "Settings(publicUrl=$publicUrl, jdbcUrl=$jdbcUrl, dbUser=$dbUser, dbPassword=[redacted], " +
+        "clientId=$clientId, clientSecret=[redacted], redirects=$redirects, files=$files, port=$port, " +
+        "publicPlugin=$publicPlugin, openAiDomainChallenge=[redacted], trustReverseProxy=$trustReverseProxy, " +
+        "s3Storage=$s3Storage, hostedMode=$hostedMode, androidPublicUrl=$androidPublicUrl, connectionKeyMaterial=$connectionKeyMaterial)"
+
     init {
         val uri = URI(publicUrl)
         require(uri.scheme == "https" || (uri.scheme == "http" && uri.host == "127.0.0.1"))
@@ -29,6 +41,19 @@ data class Settings(
             require(redirects.all { URI(it).let { callback -> callback.scheme == "https" && callback.host == "chatgpt.com" && callback.query == null } })
         }
         require(openAiDomainChallenge == null || (openAiDomainChallenge.length in 1..2048 && openAiDomainChallenge.none(Char::isWhitespace)))
+        androidPublicUrl?.let { value ->
+            val androidUri = URI(value)
+            require(androidUri.scheme == "https" && !androidUri.host.isNullOrBlank() && androidUri.userInfo == null &&
+                androidUri.query == null && androidUri.fragment == null && androidUri.path.isNullOrEmpty()) {
+                "ANDROID_PUBLIC_URL must be an HTTPS origin without a path or credentials"
+            }
+        }
+        if (hostedMode) {
+            require(s3Storage != null) { "Hosted mode requires private S3-compatible attachment storage" }
+            require(connectionKeyMaterial != null) { "Hosted mode requires a stable connection-signing key pair" }
+            require(androidPublicUrl != null) { "Hosted mode requires ANDROID_PUBLIC_URL" }
+            require(URI(s3Storage.endpoint).scheme == "https") { "Hosted S3_ENDPOINT must use HTTPS" }
+        }
         redirects.forEach {
             val callback = URI(it)
             require(callback.fragment == null && callback.userInfo == null)
@@ -41,6 +66,21 @@ data class Settings(
         internal fun fromEnvironment(env: Map<String, String>): Settings {
             val explicitJdbc = env["JDBC_URL"]
             val hosted = if (explicitJdbc == null) env["DATABASE_URL"]?.let(::hostedPostgres) else null
+            val s3Keys = listOf("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")
+            val configuredS3 = s3Keys.map { key -> key to env[key]?.takeIf(String::isNotBlank) }.toMap()
+            val anyS3Value = configuredS3.values.any { it != null } || env["S3_REGION"]?.isNotBlank() == true
+            val s3 = if (!anyS3Value) null else {
+                require(configuredS3.values.all { it != null }) {
+                    "S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, and S3_SECRET_KEY must be configured together"
+                }
+                S3StorageConfig(
+                    endpoint = requireNotNull(configuredS3.getValue("S3_ENDPOINT")),
+                    bucket = requireNotNull(configuredS3.getValue("S3_BUCKET")),
+                    accessKey = requireNotNull(configuredS3.getValue("S3_ACCESS_KEY")),
+                    secretKey = requireNotNull(configuredS3.getValue("S3_SECRET_KEY")),
+                    region = env["S3_REGION"]?.takeIf(String::isNotBlank) ?: "auto",
+                )
+            }
             return Settings(
                 publicUrl = (env["PUBLIC_URL"] ?: env["RENDER_EXTERNAL_URL"] ?: "http://127.0.0.1:8081").trimEnd('/'),
                 jdbcUrl = explicitJdbc ?: hosted?.jdbcUrl ?: "jdbc:postgresql://127.0.0.1:5432/habit_tracker",
@@ -54,7 +94,20 @@ data class Settings(
                 publicPlugin = env["PUBLIC_CHATGPT_PLUGIN"]?.toBooleanStrict() ?: false,
                 openAiDomainChallenge = env["OPENAI_APPS_CHALLENGE"]?.takeIf(String::isNotEmpty),
                 trustReverseProxy = env["TRUST_REVERSE_PROXY"]?.toBooleanStrict() ?: false,
+                s3Storage = s3,
+                hostedMode = env["HOSTED_MODE"]?.toBooleanStrict() ?: false,
+                androidPublicUrl = (env["ANDROID_PUBLIC_URL"] ?: env["RENDER_EXTERNAL_URL"])?.trimEnd('/')?.takeIf(String::isNotEmpty),
+                connectionKeyMaterial = connectionKeyMaterial(env),
             )
+        }
+
+        private fun connectionKeyMaterial(env: Map<String, String>): ConnectionKeyMaterial? {
+            val privateKey = env["CONNECTION_PRIVATE_KEY_BASE64"]?.takeIf(String::isNotBlank)
+            val publicKey = env["CONNECTION_PUBLIC_KEY_BASE64"]?.takeIf(String::isNotBlank)
+            require((privateKey == null) == (publicKey == null)) {
+                "CONNECTION_PRIVATE_KEY_BASE64 and CONNECTION_PUBLIC_KEY_BASE64 must be configured together"
+            }
+            return if (privateKey == null) null else ConnectionKeyMaterial(privateKey, requireNotNull(publicKey))
         }
 
         private fun hostedPostgres(value: String): HostedPostgres {

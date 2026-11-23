@@ -13,7 +13,7 @@ import java.time.ZoneId
 import java.util.Base64
 import java.util.UUID
 
-fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
+fun mainMcp(store: Store, identity: Identity, settings: Settings, attachmentStorage: AttachmentStorage): Server {
     val server = Server(Implementation("habit-tracker","0.4.0"),ServerOptions(capabilities=ServerCapabilities(tools=ServerCapabilities.Tools(listChanged=false))))
     val publicTools = setOf(
         "get_tasks", "get_notes", "get_habits", "get_habit_history", "get_projects", "search_records", "get_week_review",
@@ -96,7 +96,8 @@ fun mainMcp(store: Store, identity: Identity, settings: Settings): Server {
             val args=requireNotNull(request.arguments); require(args.keys==setOf("id"))
             val file=store.attachment(identity.userId,args.str("id")) ?: throw ApiFailure(404,"Файл не найден")
             require(file.first.size<=5*1024*1024) {"Для передачи AI поддерживаются файлы до 5 МБ"}
-            val bytes=Base64.getEncoder().encodeToString(Files.readAllBytes(settings.files.resolve(file.second)))
+            val blob=attachmentStorage.get(file.second) ?: throw ApiFailure(404,"Файл не найден")
+            val bytes=Base64.getEncoder().encodeToString(blob)
             val payload: ContentBlock=if(file.first.mediaType in setOf("image/png","image/jpeg","image/webp")) ImageContent(data=bytes,mimeType=file.first.mediaType)
                 else EmbeddedResource(resource=BlobResourceContents(blob=bytes,uri="habittracker://attachment/${file.first.id}",mimeType=file.first.mediaType))
             CallToolResult(content=listOf(TextContent(WireJson.encodeToString(file.first)),payload),isError=false)

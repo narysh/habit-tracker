@@ -47,6 +47,7 @@ class StoreTest {
         val owner = account()
         val other = account()
         val dir = Files.createTempDirectory("habit-deletion-")
+        val storage = LocalFilesystemAttachmentStorage(dir)
         fun noteWithFile(userId: String, key: String): Attachment {
             val fileId = UUID.randomUUID().toString()
             val note = mutation(NoteContent("Файл", attachmentIds = listOf(fileId)))
@@ -71,10 +72,10 @@ class StoreTest {
             store.deleteAccount(owner.userId, owner.token)
             assertNull(store.attachment(owner.userId, retryAttachment.id))
             assertNotNull(store.attachment(other.userId, keptAttachment.id))
-            assertEquals(2, store.purgeDeletedAccountFiles(dir))
+            assertEquals(2, store.purgeDeletedAccountFiles(storage))
             assertFalse(Files.exists(ready))
             assertTrue(Files.exists(retry))
-            assertEquals(0, store.purgeDeletedAccountFiles(dir))
+            assertEquals(0, store.purgeDeletedAccountFiles(storage))
 
             Files.delete(blockedFile)
             postgres.postgresDatabase.connection.use { connection ->
@@ -84,8 +85,8 @@ class StoreTest {
                 }
             }
             Store(postgres.getJdbcUrl("postgres","postgres"), "postgres", "").use { restarted ->
-                assertEquals(1, restarted.purgeDeletedAccountFiles(dir))
-                assertEquals(0, restarted.purgeDeletedAccountFiles(dir))
+                assertEquals(1, restarted.purgeDeletedAccountFiles(storage))
+                assertEquals(0, restarted.purgeDeletedAccountFiles(storage))
             }
             assertFalse(Files.exists(retry))
             assertEquals("b", Files.readString(kept))
@@ -101,6 +102,7 @@ class StoreTest {
         val owner = account()
         val other = account()
         val dir = Files.createTempDirectory("habit-attachment-gc-")
+        val storage = LocalFilesystemAttachmentStorage(dir)
         fun noteWithFile(userId: String, key: String): Pair<Item,Attachment> {
             val fileId = UUID.randomUUID().toString()
             val item = store.mutate(userId, mutation(NoteContent("Файл", attachmentIds = listOf(fileId)))).item!!
@@ -123,14 +125,14 @@ class StoreTest {
             assertEquals(1, store.queueUnlinkedAttachmentFiles())
             assertNull(store.attachment(owner.userId, removed.id))
             assertNotNull(store.attachment(other.userId, kept.id))
-            assertTrue(store.purgeDeletedAccountFiles(dir) >= 1)
+            assertTrue(store.purgeDeletedAccountFiles(storage) >= 1)
             assertFalse(Files.exists(dir.resolve(removed.id)))
             assertTrue(Files.exists(dir.resolve(keptKey)))
 
             store.mutate(owner.userId, Mutation(UUID.randomUUID().toString(), deletedNote.id, deletedNote.version, deletedNote.content, deleted = true))
             assertTrue(store.attachments(owner.userId, deletedNote.id).isEmpty())
             assertEquals(1, store.queueUnlinkedAttachmentFiles())
-            assertTrue(store.purgeDeletedAccountFiles(dir) >= 1)
+            assertTrue(store.purgeDeletedAccountFiles(storage) >= 1)
             assertFalse(Files.exists(dir.resolve(deletedKey)))
         } finally {
             Files.deleteIfExists(dir.resolve(removedKey))
