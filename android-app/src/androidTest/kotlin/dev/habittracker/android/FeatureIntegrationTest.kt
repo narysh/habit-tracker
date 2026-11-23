@@ -90,7 +90,7 @@ class FeatureIntegrationTest {
             compose.onNodeWithText("Сохранить пароль").assertExists()
             compose.onNodeWithText("Отмена").performClick()
             compose.onNodeWithText("Сохранить пароль").assertDoesNotExist()
-            compose.onNodeWithText("Сегодня").assertExists()
+            compose.waitUntil(5000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
         }
     }
     @Test fun taskLinkCreatesTaskWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
