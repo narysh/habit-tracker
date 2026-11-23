@@ -89,7 +89,8 @@ class FeatureIntegrationTest {
             compose.onNodeWithText("Текущий пароль, если есть").assertExists()
             compose.onNodeWithText("Сохранить пароль").assertExists()
             compose.onNodeWithText("Отмена").performClick()
-            compose.onNodeWithText("Настройки").assertExists()
+            compose.onNodeWithText("Сохранить пароль").assertDoesNotExist()
+            compose.onNodeWithText("Сегодня").assertExists()
         }
     }
     @Test fun taskLinkCreatesTaskWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
