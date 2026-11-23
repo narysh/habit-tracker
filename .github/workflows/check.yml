@@ -122,7 +122,7 @@ jobs:
           bash gradlew :android-app:connectedDebugAndroidTest \
             --no-daemon \
             '-Pandroid.testInstrumentationRunnerArguments.backend_url=http://10.0.2.2:18082' \
-            '-Pandroid.testInstrumentationRunnerArguments.class=dev.habittracker.android.IntegrationTest,dev.habittracker.android.FeatureIntegrationTest'
+            '-Pandroid.testInstrumentationRunnerArguments.class=dev.habittracker.android.IntegrationTest,dev.habittracker.android.FeatureIntegrationTest,dev.habittracker.android.AuthFlowTest'
       - name: Upload Android integration test results
         if: always()
         uses: actions/upload-artifact@v4
