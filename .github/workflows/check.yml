@@ -60,7 +60,7 @@ jobs:
               cat "$RUNNER_TEMP/habit-emulator.log"
               exit 1
             fi
-            if [ "$(adb -s emulator-5554 get-state 2>/dev/null | tr -d '\r')" = "device" ]; then device_ready=true; break; fi
+            if [ "$(timeout 5s adb -s emulator-5554 get-state 2>/dev/null | tr -d '\r')" = "device" ]; then device_ready=true; break; fi
             sleep 2
           done
           if [ "$device_ready" != true ]; then
@@ -74,7 +74,7 @@ jobs:
               cat "$RUNNER_TEMP/habit-emulator.log"
               exit 1
             fi
-            if [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then boot_completed=true; break; fi
+            if [ "$(timeout 5s adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then boot_completed=true; break; fi
             sleep 2
           done
           if [ "$boot_completed" != true ]; then
