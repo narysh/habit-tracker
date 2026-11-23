@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
@@ -54,7 +55,7 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.serialization.Serializable
 
-private val mobileChatGptInstructions = """Когда я прошу добавить задачу, заметку или привычку в Habit Tracker, ответь одной Markdown-ссылкой «Добавить в Habit Tracker» на https://narysh.github.io/habit-tracker/task/#.... Для задачи укажи kind=task&title=...&description=...&date=ГГГГ-ММ-ДД&time=ЧЧ%3AММ; для заметки kind=note&title=...&text=...; для привычки kind=habit&title=...&description=...&days=2%2C4 для выбранных дней или target=3 для недельной цели. Дни нумеруются с понедельника: 1–7. Кодируй параметры URL-кодированием, не придумывай сроки, текст или расписание. Если данных не хватает, сначала задай вопрос. Не утверждай, что запись уже сохранена: она появится после нажатия ссылки и открытия Habit Tracker. Если ссылка не открывается, предложи «Поделиться → Habit Tracker»."""
+private val mobileChatGptInstructions = """Когда я прошу добавить задачу, заметку или привычку в Habit Tracker, подготовь короткий блок для команды «Поделиться → Habit Tracker». Для задачи начни ответ со строки «Задача: название», срок укажи понятными словами, например «завтра в 18:30», описание — следующей строкой. Для заметки начни с «Заметка: заголовок», затем помести текст заметки. Для привычки начни с «Привычка: название», а следующей строкой укажи «Дни: вторник, четверг» или «Цель: 3 дня в неделю». Не придумывай сроки или расписание; если данных не хватает, сначала задай вопрос. Сохраняй нужные мне подробности и не утверждай, что запись уже сохранена: она появится после того, как я отправлю ответ в Habit Tracker через Android-команду «Поделиться»."""
 
 @Serializable private data class EditorDraftState(val id: String, val content: Content)
 private val editorDraftSaver = Saver<Pair<String, Content>?, String>(
@@ -341,6 +342,7 @@ private fun Content.description(): String = when(this) {
 }
 @Composable private fun LoginScreen(vm: AppViewModel,modifier: Modifier) {
     var email by rememberSaveable { mutableStateOf("") }; var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
     var url by rememberSaveable { mutableStateOf(vm.app.preferences.url()) }; var register by rememberSaveable { mutableStateOf(false) }
     val busy by vm.busy.collectAsStateWithLifecycle()
     val connectedUrl by vm.serverUrl.collectAsStateWithLifecycle()
@@ -351,7 +353,15 @@ private fun Content.description(): String = when(this) {
         Text("Задачи, заметки и привычки",style=MaterialTheme.typography.titleLarge)
         Text(if(register) "Создай свой аккаунт" else "Войди, чтобы синхронизировать данные")
         OutlinedTextField(email,{email=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth())
-        OutlinedTextField(password,{password=it},label={Text("Пароль${if(register) " — от 10 символов" else ""}")},visualTransformation=PasswordVisualTransformation(),singleLine=true,modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(
+            value=password,
+            onValueChange={password=it},
+            label={Text("Пароль${if(register) " — от 10 символов" else ""}")},
+            visualTransformation=if(passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon={TextButton(onClick={passwordVisible=!passwordVisible}) { Text(if(passwordVisible) "Скрыть" else "Показать") }},
+            singleLine=true,
+            modifier=Modifier.fillMaxWidth()
+        )
         SocialButtons(vm,false)
         TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }
         if(advanced) OutlinedTextField(url,{url=it;vm.manualAddress(it)},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
@@ -466,8 +476,9 @@ private fun Content.description(): String = when(this) {
         title = { Text("Импорт из ChatGPT на телефоне") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. ChatGPT вернёт ссылку: нажми «Добавить в Habit Tracker», и запись сразу появится в приложении.")
-                Text("Если ссылка не открылась, выбери у ответа «Поделиться → Habit Tracker». Такой способ тоже сохраняет задачу, заметку или привычку сразу; нераспознанное расписание откроется для проверки.", style = MaterialTheme.typography.bodySmall)
+                Text("Чтобы добавить запись из ChatGPT на телефоне, нажми у ответа «Поделиться» и выбери Habit Tracker. Задача, заметка или привычка появится в приложении; неоднозначный срок или график откроется для проверки.")
+                Text("Можно скопировать подсказку ниже в пользовательские инструкции ChatGPT: она просит оформлять ответы так, чтобы Habit Tracker распознавал их при отправке через «Поделиться». Подключение MCP настраивается в ChatGPT через браузер; после этого приложение синхронизирует данные с тем же аккаунтом.", style = MaterialTheme.typography.bodySmall)
+                Text("Ссылка «Добавить в Habit Tracker» остаётся запасным способом: запись появится только после нажатия на неё.", style = MaterialTheme.typography.bodySmall)
                 Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Habit Tracker", mobileChatGptInstructions))
