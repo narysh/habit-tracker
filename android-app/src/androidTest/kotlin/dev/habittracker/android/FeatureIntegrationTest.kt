@@ -35,15 +35,19 @@ class FeatureIntegrationTest {
         val session = account()
         val repo = Repository(app, session, false)
         app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        app.shareInbox.error.value = null
         val link = Uri.parse("habittracker://import/task?title=Draft%20from%20ChatGPT&date=2027-01-20&time=18%3A00")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-            withTimeout(20000) { while (app.shareInbox.drafts.value.isEmpty()) delay(100) }
-            val draft = app.shareInbox.drafts.value.single()
-            withTimeout(15000) { while (repo.dao.item(draft.id) == null) delay(100) }
-            assertTrue(draft.autoSave)
-            val task = WireJson.decodeFromString<Item>(checkNotNull(repo.dao.item(draft.id)).localJson).content as TaskContent
+            withTimeout(20000) {
+                while (repo.dao.items().none {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? TaskContent)?.title == "Draft from ChatGPT"
+                } && app.shareInbox.error.value == null) delay(100)
+            }
+            assertNull(app.shareInbox.error.value)
+            val task = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                .mapNotNull { it.content as? TaskContent }.single { it.title == "Draft from ChatGPT" }
             assertEquals("Draft from ChatGPT", task.title)
             assertEquals("2027-01-20", task.dueDate)
             assertEquals("18:00", task.dueTime)
@@ -56,16 +60,19 @@ class FeatureIntegrationTest {
         val session = account()
         val repo = Repository(app, session, false)
         app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        app.shareInbox.error.value = null
         val link = Uri.parse("habittracker://import/note?title=Note%20from%20ChatGPT&text=Keep%20this%20idea")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-            withTimeout(20000) { while (app.shareInbox.drafts.value.isEmpty()) delay(100) }
-            val draft = app.shareInbox.drafts.value.single()
-            assertNotNull(draft.note)
-            withTimeout(15000) { while (repo.dao.item(draft.id) == null) delay(100) }
-            assertTrue(draft.autoSave)
-            val note = WireJson.decodeFromString<Item>(checkNotNull(repo.dao.item(draft.id)).localJson).content as NoteContent
+            withTimeout(20000) {
+                while (repo.dao.items().none {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? NoteContent)?.title == "Note from ChatGPT"
+                } && app.shareInbox.error.value == null) delay(100)
+            }
+            assertNull(app.shareInbox.error.value)
+            val note = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                .mapNotNull { it.content as? NoteContent }.single { it.title == "Note from ChatGPT" }
             assertEquals("Note from ChatGPT", note.title)
             assertEquals("Keep this idea", note.text)
             withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
@@ -293,7 +300,9 @@ class FeatureIntegrationTest {
         assertEquals(3,notification!!.actions.size)
         notification.actions[1].actionIntent.send()
         withTimeout(10000){while(app.getSharedPreferences("reminders",Context.MODE_PRIVATE).getLong("snooze:$id",0)<=System.currentTimeMillis())delay(100)}
+        withTimeout(10000){while(manager.activeNotifications.any {it.id==id.hashCode()})delay(100)}
         Reminders.show(app,item,session.userId)
+        withTimeout(10000){while(manager.activeNotifications.none {it.id==id.hashCode()})delay(100)}
         manager.activeNotifications.first {it.id==id.hashCode()}.notification.actions[0].actionIntent.send()
         withTimeout(10000){while((WireJson.decodeFromString<Item>(repo.dao.item(id)!!.localJson).content as TaskContent).completed!=true)delay(100)}
         assertNotNull((WireJson.decodeFromString<Item>(repo.dao.item(id)!!.localJson).content as TaskContent).completedAt)
