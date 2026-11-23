@@ -38,11 +38,13 @@ class ShareInbox(private val context: Context) {
     private fun store(value: List<SharedDraft>){val temp=File(directory,"drafts.tmp");temp.writeText(WireJson.encodeToString(value));check(temp.renameTo(manifest));drafts.value=value}
     @Synchronized fun receiveDraftLink(link: String) {
         val content = contentDraftFromLink(link, ZoneId.systemDefault().id)
-        if (drafts.value.any { it.task == content || it.note == content }) return
+        val id = UUID.nameUUIDFromBytes("habit-tracker-import:${link.trim()}".toByteArray(Charsets.UTF_8)).toString()
+        if (drafts.value.any { it.id == id }) return
         require(drafts.value.size < 10) { "Сначала сохрани или отклони предыдущие черновики" }
         val task = content as? TaskContent
         val note = content as? NoteContent
-        store(drafts.value + SharedDraft(UUID.randomUUID().toString(), content.title, task?.description ?: note?.text.orEmpty(), emptyList(), task, note, autoSave = true))
+        val habit = content as? HabitContent
+        store(drafts.value + SharedDraft(id, content.title, task?.description ?: note?.text ?: habit?.description.orEmpty(), emptyList(), task, note, autoSave = true, habit = habit))
     }
     @Synchronized fun receive(intent: Intent) {
         require(intent.action in setOf(Intent.ACTION_SEND,Intent.ACTION_SEND_MULTIPLE))

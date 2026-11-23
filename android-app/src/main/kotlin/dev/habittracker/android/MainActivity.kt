@@ -48,7 +48,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import java.util.UUID
 
-private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, ответь коротким текстом, начинающимся с «Задача:». Добавляй срок и время только если я их назвал; не придумывай их. Когда я прошу сохранить заметку, ответь «Заметка: Заголовок», а текст заметки помести на следующих строках. Когда я прошу создать привычку, ответь «Привычка: Название», а на следующей строке укажи «Дни: вторник, четверг» либо «Цель: 3 дня в неделю». Используй только названное мной расписание; если я не уточнил дни или цель, задай вопрос. Не добавляй вступление и Markdown. Я отправлю ответ через «Поделиться → Habit Tracker»; выбранная запись появится сразу."""
+private val mobileChatGptInstructions = """Когда я прошу создать задачу, заметку или привычку в Habit Tracker, ответь одной Markdown-ссылкой с текстом «Добавить в Habit Tracker». Для задачи используй адрес habittracker://import/task?title=...&description=...&date=ГГГГ-ММ-ДД&time=ЧЧ%3AММ; добавляй description, date и time только при необходимости. Для заметки используй habittracker://import/note?title=...&text=.... Для привычки используй habittracker://import/habit?title=...&description=...&days=2%2C4 для выбранных дней или &target=3 для цели дней в неделю; нумерация дней: понедельник 1, воскресенье 7. Кодируй значения параметров URL-кодированием, не придумывай сроки, текст или расписание. Если не хватает названия либо расписания привычки — сначала задай вопрос. Не утверждай, что запись уже сохранена: она появится, когда я нажму ссылку. Если ссылка не откроется, я отправлю ответ через «Поделиться → Habit Tracker»."""
 
 class MainActivity : ComponentActivity() {
     private fun receive(intent: Intent) {
@@ -400,8 +400,8 @@ private fun Content.description(): String = when(this) {
         title = { Text("Импорт из ChatGPT на телефоне") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. Когда ChatGPT сформулирует задачу, заметку или привычку, выбери в меню ответа «Поделиться → Habit Tracker» — запись сразу появится в приложении.")
-                Text("В мобильном ChatGPT выбери «Поделиться → Habit Tracker». Ответ с «Задача:», «Заметка:» или «Привычка:» сохранится сразу; нераспознанное расписание откроется для проверки. Ссылки на задачи и заметки тоже сохраняются при открытии.", style = MaterialTheme.typography.bodySmall)
+                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. ChatGPT вернёт ссылку: нажми «Добавить в Habit Tracker», и запись сразу появится в приложении.")
+                Text("Если ссылка не открылась, выбери у ответа «Поделиться → Habit Tracker». Такой способ тоже сохраняет задачу, заметку или привычку сразу; нераспознанное расписание откроется для проверки.", style = MaterialTheme.typography.bodySmall)
                 Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Habit Tracker", mobileChatGptInstructions))

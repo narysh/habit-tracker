@@ -80,6 +80,62 @@ class FeatureIntegrationTest {
         }
         repo.database.close()
     }
+    @Test fun weekdayHabitLinkCreatesHabitWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
+        val session = account()
+        val repo = Repository(app, session, false)
+        app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        app.shareInbox.error.value = null
+        val title = "Run weekdays from ChatGPT"
+        val link = Uri.parse("habittracker://import/habit?title=Run%20weekdays%20from%20ChatGPT&days=2%2C4")
+        val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
+        assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            withTimeout(20000) {
+                while (repo.dao.items().none {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
+                } && app.shareInbox.error.value == null) delay(100)
+            }
+            assertNull(app.shareInbox.error.value)
+            val habit = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                .mapNotNull { it.content as? HabitContent }.single { it.title == title }
+            assertEquals(HabitMode.WEEKDAYS, habit.mode)
+            assertEquals(setOf(2, 4), habit.weekdays)
+            assertEquals(LocalDate.now(ZoneId.systemDefault()).toString(), habit.startsOn)
+            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            compose.onNodeWithText(title).assertIsDisplayed()
+        }
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+        }
+        assertEquals(1, repo.dao.items().count { (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title })
+        repo.database.close()
+    }
+    @Test fun weeklyTargetHabitLinkCreatesHabitWhenTheUserOpensIt() = runBlocking(Dispatchers.IO) {
+        val session = account()
+        val repo = Repository(app, session, false)
+        app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        app.shareInbox.error.value = null
+        val title = "Stretch three times from ChatGPT"
+        val link = Uri.parse("habittracker://import/habit?title=Stretch%20three%20times%20from%20ChatGPT&target=3")
+        val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
+        assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            withTimeout(20000) {
+                while (repo.dao.items().none {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
+                } && app.shareInbox.error.value == null) delay(100)
+            }
+            assertNull(app.shareInbox.error.value)
+            val habit = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
+                .mapNotNull { it.content as? HabitContent }.single { it.title == title }
+            assertEquals(HabitMode.WEEKLY_TARGET, habit.mode)
+            assertEquals(3, habit.targetPerWeek)
+            assertTrue(habit.weekdays.isEmpty())
+            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            compose.onNodeWithText(title).assertIsDisplayed()
+        }
+        repo.database.close()
+    }
     @Test fun existingRoomDatabaseOpensWithBundledDriverWithoutLosingOutbox()=runBlocking(Dispatchers.IO) {
         val key="driver-migration-${UUID.randomUUID()}";val id=UUID.randomUUID().toString()
         val item=Item(id,0,TaskContent("Сохранено в старой версии"),false,Instant.now().toString(),0)

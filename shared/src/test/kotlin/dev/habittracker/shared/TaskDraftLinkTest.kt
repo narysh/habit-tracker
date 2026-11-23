@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import java.time.LocalDate
 
 class TaskDraftLinkTest {
     @Test fun `browser and shared HTTPS link give the same editable draft`() {
@@ -39,5 +41,49 @@ class TaskDraftLinkTest {
             "habittracker://import/note?title=One&text=x&attachmentId=other",
             "habittracker://import/note?title=Bad%00title&text=x"
         )) assertFailsWith<IllegalArgumentException>(link) { noteDraftFromLink(link) }
+    }
+
+    @Test fun `habit links create weekday or weekly target schedules for today's local date`() {
+        val today = LocalDate.parse("2026-11-23")
+        val weekdays = habitDraftFromLink(
+            "habittracker://import/habit?title=%D0%91%D0%B5%D0%B3&description=%D0%9A%D0%BE%D1%80%D0%BE%D1%82%D0%BA%D0%BE&days=2%2C4",
+            "Europe/Moscow",
+            today,
+        )
+        assertEquals("Бег", weekdays.title)
+        assertEquals("Коротко", weekdays.description)
+        assertEquals(HabitMode.WEEKDAYS, weekdays.mode)
+        assertEquals(setOf(2, 4), weekdays.weekdays)
+        assertEquals(today.toString(), weekdays.startsOn)
+        val routed = contentDraftFromLink(
+            "habittracker://import/habit?title=%D0%91%D0%B5%D0%B3&description=%D0%9A%D0%BE%D1%80%D0%BE%D1%82%D0%BA%D0%BE&days=2%2C4",
+            "Europe/Moscow",
+        ) as HabitContent
+        assertEquals(setOf(2, 4), routed.weekdays)
+
+        val target = habitDraftFromLink("habittracker://import/habit?title=Stretch&target=3", "UTC", today)
+        assertEquals(HabitMode.WEEKLY_TARGET, target.mode)
+        assertEquals(3, target.targetPerWeek)
+        assertTrue(target.weekdays.isEmpty())
+        assertEquals(today.toString(), target.startsOn)
+    }
+
+    @Test fun `habit links reject missing or conflicting schedules and unknown fields`() {
+        for (query in listOf(
+            "title=Run",
+            "title=Run&days=2&target=3",
+            "title=Run&days=2%2C2",
+            "title=Run&days=8",
+            "title=Run&target=0",
+            "title=Run&target=8",
+            "title=Run&days=2&id=other",
+            "title=Run&days=2&days=3",
+            "title=",
+        )) assertFailsWith<IllegalArgumentException>(query) {
+            habitDraftFromLink("habittracker://import/habit?$query", "UTC")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            habitDraftFromLink("https://elsewhere.example/habit/#title=Run&days=2", "UTC")
+        }
     }
 }

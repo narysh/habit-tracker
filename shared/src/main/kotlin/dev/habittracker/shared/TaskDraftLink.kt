@@ -2,6 +2,8 @@ package dev.habittracker.shared
 
 import java.net.URI
 import java.net.URLDecoder
+import java.time.LocalDate
+import java.time.ZoneId
 
 const val TASK_DRAFT_PAGE = "https://narysh.github.io/habit-tracker/task/"
 
@@ -53,8 +55,36 @@ fun noteDraftFromLink(link: String): NoteContent {
     return note
 }
 
+/** A habit link supplies only its schedule. The app chooses today's local start date and zone. */
+fun habitDraftFromLink(link: String, zoneId: String, today: LocalDate = LocalDate.now(ZoneId.of(zoneId))): HabitContent {
+    val (fields, isWeb) = draftFields(link, "/habit", setOf("title", "description", "days", "target"))
+    require(!isWeb) { "Ссылка на привычку должна открываться непосредственно в Habit Tracker" }
+    val title = fields["title"].orEmpty().trim()
+    val description = fields["description"].orEmpty()
+    require(title.none(Char::isISOControl) && description.none { it.isISOControl() && it != '\n' && it != '\t' }) {
+        "В ссылке есть недопустимые символы"
+    }
+    require(("days" in fields) xor ("target" in fields)) { "Укажи дни недели или цель за неделю" }
+    val habit = if ("days" in fields) {
+        val days = fields.getValue("days").split(',').map { it.toIntOrNull() ?: 0 }
+        require(days.isNotEmpty() && days.distinct().size == days.size && days.all { it in 1..7 }) {
+            "Дни недели должны быть числами от 1 до 7 без повторов"
+        }
+        HabitContent(title, description, HabitMode.WEEKDAYS, days.toSet(), startsOn = today.toString(), zoneId = zoneId)
+    } else {
+        val target = requireNotNull(fields.getValue("target").toIntOrNull()) { "Цель должна быть числом от 1 до 7" }
+        require(target in 1..7) { "Цель должна быть от 1 до 7 дней в неделю" }
+        HabitContent(title, description, HabitMode.WEEKLY_TARGET, emptySet(), target, today.toString(), zoneId)
+    }
+    habit.validate()
+    return habit
+}
+
 fun contentDraftFromLink(link: String, zoneId: String): Content {
     val uri = URI.create(link)
+    if (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/habit") {
+        return habitDraftFromLink(link, zoneId)
+    }
     val isNote = (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/note") ||
         (link.startsWith("$TASK_DRAFT_PAGE#") && uri.rawFragment.orEmpty().split('&').any { it.substringBefore('=') == "kind" && it.substringAfter('=', "") == "note" })
     return if (isNote) noteDraftFromLink(link) else taskDraftFromLink(link, zoneId)
