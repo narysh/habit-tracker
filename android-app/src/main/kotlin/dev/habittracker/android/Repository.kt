@@ -146,7 +146,37 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
                 dao.file(LocalFile(file.id,file.noteId,file.name,file.mediaType,file.size,existing?.path,true))
             }
         }
+        cleanupDetachedAttachmentCopies()
         Reminders.reschedule(app,this); TrackerWidget.updateAll(app)
+    }
+    private suspend fun cleanupDetachedAttachmentCopies() {
+        val referenced = mutableSetOf<String>()
+        fun retain(content: Content, deleted: Boolean = false) {
+            if (!deleted) (content as? NoteContent)?.attachmentIds?.let(referenced::addAll)
+        }
+        for (row in dao.items()) {
+            WireJson.decodeFromString<Item>(row.localJson).let { retain(it.content,it.deleted) }
+            row.serverJson?.let { WireJson.decodeFromString<Item>(it).let { item -> retain(item.content,item.deleted) } }
+        }
+        for (conflict in dao.allConflicts()) {
+            WireJson.decodeFromString<Item>(conflict.localJson).let { retain(it.content) }
+            conflict.remoteJson?.let { WireJson.decodeFromString<Item>(it).let { item -> retain(item.content) } }
+        }
+        for (pending in dao.allPending()) {
+            WireJson.decodeFromString<Mutation>(pending.operationJson).let { retain(it.content,it.deleted) }
+        }
+        val root = File(app.filesDir,"attachments/$key").canonicalFile
+        for (file in dao.files()) {
+            if (file.id in referenced) continue
+            val path = file.path
+            if (path != null) {
+                val target = runCatching { File(path).canonicalFile }.getOrNull() ?: continue
+                if (target.parentFile != root || target.name != file.id) continue
+                if (target.exists() && !target.delete()) continue
+            }
+            dao.removeFile(file.id)
+        }
+        if (root.isDirectory && root.list()?.isEmpty() == true) root.delete()
     }
     suspend fun attach(noteId: String,uri: Uri,nameOverride: String?=null,mimeOverride: String?=null,attachmentId: String=UUID.randomUUID().toString(),notify: Boolean=true) {
         val item = dao.item(noteId)?.let { WireJson.decodeFromString<Item>(it.localJson) } ?: error("Заметка не найдена")
@@ -167,9 +197,12 @@ class Repository(val app: HabitApplication,val session: Session,private val auto
         } catch(e: Throwable) { target.delete(); dao.removeFile(id); throw e }
     }
     suspend fun fileMetadata(noteId: String): List<LocalFile> {
+        val note = dao.item(noteId)?.let { WireJson.decodeFromString<Item>(it.localJson).content as? NoteContent }
+            ?: return emptyList()
+        val referenced = note.attachmentIds.toSet()
         val files=api.get<List<Attachment>>("/api/v1/notes/$noteId/attachments")
-        files.forEach {file->val old=dao.file(file.id);dao.file(LocalFile(file.id,file.noteId,file.name,file.mediaType,file.size,old?.path,true))}
-        return dao.files().filter {it.noteId==noteId}
+        files.filter { it.id in referenced }.forEach {file->val old=dao.file(file.id);dao.file(LocalFile(file.id,file.noteId,file.name,file.mediaType,file.size,old?.path,true))}
+        return dao.files().filter {it.noteId==noteId && it.id in referenced}
     }
     suspend fun cachedFile(file: LocalFile): File {
         file.path?.let { if(File(it).exists()) return File(it) }
@@ -200,13 +233,22 @@ class HabitApplication : android.app.Application() {
         if(cached?.session?.userId != session.userId || cached?.serverUrl != preferences.url()) cached=Repository(this,session)
         return cached
     }
-    @Synchronized fun deleteLocalAccountData() {
+    class LocalAccountData internal constructor(val key: String, val database: TrackerDatabase?)
+    @Synchronized fun detachLocalAccountData(): LocalAccountData {
         val key=preferences.storageKey()
-        cached?.database?.close()
+        val database=cached?.database
         cached=null
-        deleteDatabase("tracker-$key.db")
-        File(filesDir,"attachments/$key").deleteRecursively()
         preferences.clearAccount()
+        return LocalAccountData(key,database)
+    }
+    fun eraseLocalAccountData(data: LocalAccountData) {
+        data.database?.close()
+        deleteDatabase("tracker-${data.key}.db")
+        File(filesDir,"attachments/${data.key}").deleteRecursively()
+    }
+    @Synchronized fun deleteLocalAccountData() {
+        val data=detachLocalAccountData()
+        eraseLocalAccountData(data)
     }
 }
 class SyncWorker(context: Context,params: WorkerParameters) : CoroutineWorker(context,params) {

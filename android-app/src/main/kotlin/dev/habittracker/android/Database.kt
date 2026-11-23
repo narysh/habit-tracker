@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
     @Query("SELECT * FROM items WHERE id=:id") suspend fun item(id: String): LocalItem?
     @Upsert suspend fun item(value: LocalItem)
     @Query("SELECT * FROM outbox WHERE error IS NULL") suspend fun pending(): List<PendingMutation>
+    @Query("SELECT * FROM outbox") suspend fun allPending(): List<PendingMutation>
     @Query("SELECT * FROM outbox WHERE itemId=:id") suspend fun pending(id: String): PendingMutation?
     @Upsert suspend fun pending(value: PendingMutation)
     @Query("DELETE FROM outbox WHERE itemId=:id") suspend fun removePending(id: String)

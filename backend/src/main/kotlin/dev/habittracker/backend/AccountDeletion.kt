@@ -10,6 +10,36 @@ import java.util.UUID
 @Serializable
 internal data class AccountDeletionRequest(val confirmation: String)
 
+/** Move unreferenced attachment blobs to the durable purge queue while holding each account lock. */
+internal fun queueUnlinkedAttachmentFiles(c: Connection): Int {
+    val candidates = c.prepareStatement(
+        """SELECT a.user_id::text,a.storage_key
+           FROM attachments a
+           JOIN items i ON i.user_id=a.user_id AND i.id=a.note_id
+           JOIN users u ON u.id=a.user_id
+           WHERE i.deleted OR NOT COALESCE(jsonb_exists(i.body->'attachmentIds',a.id::text),false)
+           ORDER BY a.storage_key
+           LIMIT 64
+           FOR UPDATE OF u,a SKIP LOCKED"""
+    ).use { statement ->
+        statement.executeQuery().use { rows -> buildList {
+            while (rows.next()) add(rows.getString(1) to rows.getString(2))
+        } }
+    }
+    for ((userId,key) in candidates) {
+        c.prepareStatement("INSERT INTO account_file_purge(storage_key) VALUES (?) ON CONFLICT DO NOTHING").use {
+            it.setString(1,key)
+            it.executeUpdate()
+        }
+        c.prepareStatement("DELETE FROM attachments WHERE user_id=?::uuid AND storage_key=?").use {
+            it.setString(1,userId)
+            it.setString(2,key)
+            it.executeUpdate()
+        }
+    }
+    return candidates.size
+}
+
 internal fun deleteAccountRows(c: Connection, userId: String, appTokenHash: String) {
     val recent = c.prepareStatement(
         """SELECT COALESCE(issued_at > statement_timestamp() - INTERVAL '10 minutes', false)

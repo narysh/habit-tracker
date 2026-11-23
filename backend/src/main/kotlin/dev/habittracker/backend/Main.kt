@@ -57,10 +57,11 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
     launch(Dispatchers.IO) {
         while (isActive) {
             try {
+                val queued = store.queueUnlinkedAttachmentFiles()
                 val attempted = store.purgeDeletedAccountFiles(settings.files)
-                if (attempted == 64) continue
+                if (queued == 64 || attempted == 64) continue
             } catch (_: SQLException) {
-                logger.warn("Account file purge paused until the database is available")
+                logger.warn("Unlinked attachment cleanup paused until the database is available")
             }
             delay(30_000)
         }

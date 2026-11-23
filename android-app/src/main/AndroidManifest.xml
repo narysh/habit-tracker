@@ -11,7 +11,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="habittracker" android:host="import" android:path="/task" />
+                <data android:scheme="habittracker" android:host="import" android:pathPrefix="/" />
             </intent-filter>
         </activity>
         <receiver android:name=".ReminderReceiver" android:exported="false" />

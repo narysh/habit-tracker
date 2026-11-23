@@ -21,4 +21,23 @@ class TaskDraftLinkTest {
         }
         assertFailsWith<IllegalArgumentException> { taskDraftFromLink("https://elsewhere.example/task/#title=One", "UTC") }
     }
+
+    @Test fun `note links open the same editable note from browser or app`() {
+        val expected = NoteContent("Идея & план", "Первая строка\nВторая строка")
+        val browser = "$TASK_DRAFT_PAGE#kind=note&title=%D0%98%D0%B4%D0%B5%D1%8F+%26+%D0%BF%D0%BB%D0%B0%D0%BD&text=%D0%9F%D0%B5%D1%80%D0%B2%D0%B0%D1%8F+%D1%81%D1%82%D1%80%D0%BE%D0%BA%D0%B0%0A%D0%92%D1%82%D0%BE%D1%80%D0%B0%D1%8F+%D1%81%D1%82%D1%80%D0%BE%D0%BA%D0%B0"
+        val direct = "habittracker://import/note?title=%D0%98%D0%B4%D0%B5%D1%8F+%26+%D0%BF%D0%BB%D0%B0%D0%BD&text=%D0%9F%D0%B5%D1%80%D0%B2%D0%B0%D1%8F+%D1%81%D1%82%D1%80%D0%BE%D0%BA%D0%B0%0A%D0%92%D1%82%D0%BE%D1%80%D0%B0%D1%8F+%D1%81%D1%82%D1%80%D0%BE%D0%BA%D0%B0"
+        assertEquals(expected, noteDraftFromLink(browser))
+        assertEquals(expected, noteDraftFromLink(direct))
+        assertEquals(expected, contentDraftFromLink(browser, "UTC"))
+    }
+
+    @Test fun `note links reject actions account IDs duplicate fields and wrong type`() {
+        for (link in listOf(
+            "$TASK_DRAFT_PAGE#kind=note&title=One&text=x&account=other",
+            "$TASK_DRAFT_PAGE#kind=note&title=One&title=Two&text=x",
+            "$TASK_DRAFT_PAGE#kind=task&title=One&text=x",
+            "habittracker://import/note?title=One&text=x&attachmentId=other",
+            "habittracker://import/note?title=Bad%00title&text=x"
+        )) assertFailsWith<IllegalArgumentException>(link) { noteDraftFromLink(link) }
+    }
 }

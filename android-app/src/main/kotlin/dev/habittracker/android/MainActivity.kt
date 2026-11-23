@@ -1,6 +1,8 @@
 package dev.habittracker.android
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +25,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -45,6 +48,8 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import java.util.UUID
 
+private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, добавляй Markdown-ссылку [Открыть задачу](https://narysh.github.io/habit-tracker/task/#title=...). Передавай только названные мной поля: title, description, date (ГГГГ-ММ-ДД), time (ЧЧ:ММ только вместе с датой). Когда я прошу сохранить заметку, добавляй ссылку [Открыть заметку](https://narysh.github.io/habit-tracker/task/#kind=note&title=...&text=...). Кодируй значения URL-кодированием UTF-8. Не придумывай сроки. Напиши, что запись сохранится только после того, как я проверю её и нажму «Сохранить» в Habit Tracker."""
+
 class MainActivity : ComponentActivity() {
     private fun receive(intent: Intent) {
         val app=application as HabitApplication
@@ -52,7 +57,7 @@ class MainActivity : ComponentActivity() {
         if(intent.action==Intent.ACTION_SEND || intent.action==Intent.ACTION_SEND_MULTIPLE) lifecycleScope.launch(Dispatchers.IO) {try {app.shareInbox.receive(intent)}catch(e:Exception){app.shareInbox.error.value=e.message ?: "Не удалось принять данные"}}
         if (intent.action == Intent.ACTION_VIEW) intent.dataString?.let { link ->
             lifecycleScope.launch(Dispatchers.IO) {
-                try { app.shareInbox.receiveTaskLink(link) }
+                try { app.shareInbox.receiveDraftLink(link) }
                 catch (e: Exception) { app.shareInbox.error.value = e.message ?: "Не удалось открыть черновик задачи" }
             }
         }
@@ -107,6 +112,7 @@ private fun Content.description(): String = when(this) {
     var connection by remember { mutableStateOf(false) }
     var socialSettings by remember { mutableStateOf(false) }
     var chatGptLink by remember(session?.userId) { mutableStateOf(false) }
+    var mobileChatSetup by remember { mutableStateOf(false) }
     var feature by remember { mutableStateOf<String?>(null) }
     var more by remember { mutableStateOf(false) }
     var selectedPlan by remember { mutableStateOf<Item?>(null) }
@@ -201,9 +207,9 @@ private fun Content.description(): String = when(this) {
     }
     selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
     if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.let { draft ->
-        val task = draft.task
-        if (task == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
-        else Editor(draft.id, task, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) })
+        val content = draft.task ?: draft.note
+        if (content == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
+        else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) })
     }
     if(chooser) AlertDialog(onDismissRequest={chooser=false},title={Text("Добавить")},text={Column { listOf("Задачу","Привычку","Заметку").forEachIndexed { index,label -> TextButton(onClick={chooser=false;newItem(index+1)}) { Text(label) } } }},confirmButton={TextButton(onClick={chooser=false}) {Text("Закрыть")}})
     editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)}) }
@@ -211,6 +217,7 @@ private fun Content.description(): String = when(this) {
     history?.let { item -> HabitHistory(item,visible,now,{date,checked -> vm.mark(item,date,checked)},{history=null}) }
     if(socialSettings) SocialAccountDialog(vm) { socialSettings=false }
     if(chatGptLink) session?.let { account -> ChatGptLinkDialog(vm, account) { chatGptLink=false } }
+    if(mobileChatSetup) MobileChatGptSetupDialog { mobileChatSetup=false }
     if(connection) ConnectionDialog(vm) { connection=false }
     if(confirmAccountDeletion) AlertDialog(
         onDismissRequest={if(!busy)confirmAccountDeletion=false},
@@ -223,7 +230,7 @@ private fun Content.description(): String = when(this) {
         confirmButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false;vm.deleteAccount()},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)){Text("Удалить аккаунт и данные")}},
         dismissButton={TextButton(enabled=!busy,onClick={confirmAccountDeletion=false}){Text("Отмена")}}
     )
-    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
+    if(settings) AlertDialog(onDismissRequest={settings=false},title={Text("Настройки")},text={ Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) { Text(session?.email.orEmpty()); Text("Сервер: ${vm.app.preferences.url()}"); TextButton(onClick={settings=false;feature="backup"}) {Text("Резервные копии")}; TextButton(onClick={settings=false;feature="reminders"}) {Text("Напоминания")}; TextButton(onClick={settings=false;socialSettings=true}) {Text("Способы входа")}; TextButton(onClick={settings=false;chatGptLink=true}) {Text("Подключить ChatGPT через MCP")}; TextButton(onClick={settings=false;mobileChatSetup=true}) {Text("Настроить импорт из ChatGPT на телефоне")}; TextButton(onClick={settings=false;connection=true}) {Text("Подключение к серверу")}; Text("Данные сохраняются на телефоне и синхронизируются при подключении. Напоминания могут задерживаться из-за ограничений Android."); TextButton(onClick={settings=false;vm.synchronize()}) {Text("Синхронизировать сейчас")}; TextButton(onClick={settings=false;vm.logout()}) {Text("Выйти из аккаунта")}; HorizontalDivider(); TextButton(onClick={settings=false;confirmAccountDeletion=true},colors=ButtonDefaults.textButtonColors(contentColor=MaterialTheme.colorScheme.error)) {Text("Удалить аккаунт и все данные")} } },confirmButton={TextButton(onClick={settings=false}) {Text("Готово")}})
 }
 @Composable private fun ConnectionDialog(vm: AppViewModel,onClose: ()->Unit) {
     val session by vm.session.collectAsStateWithLifecycle()
@@ -374,4 +381,26 @@ private fun Content.description(): String = when(this) {
         }
         error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
     }},confirmButton={TextButton(onClick={submit(close)}) {Text("Сохранить")}},dismissButton={TextButton(onClick=close) {Text("Закрыть")}})
+}
+
+@Composable private fun MobileChatGptSetupDialog(close: () -> Unit) {
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Импорт из ChatGPT на телефоне") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Мобильное приложение ChatGPT пока не подключает MCP. Можно настроить один раз: скопируй инструкцию, вставь её в ChatGPT → Настройки → Пользовательские инструкции. После этого ChatGPT будет добавлять ссылки для задач и заметок в любом чате.")
+                Text("Когда появится ссылка, открой её, проверь запись и нажми «Сохранить». Без этого шага запись не создаётся.", style = MaterialTheme.typography.bodySmall)
+                Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
+                Button(onClick = {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Habit Tracker", mobileChatGptInstructions))
+                    copied = true
+                }) { Text(if (copied) "Инструкция скопирована" else "Скопировать инструкцию") }
+            }
+        },
+        confirmButton = { TextButton(onClick = close) { Text("Готово") } }
+    )
 }

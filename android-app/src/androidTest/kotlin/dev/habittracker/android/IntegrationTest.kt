@@ -1,9 +1,12 @@
 package dev.habittracker.android
 
+import android.Manifest
 import android.net.Uri
+import android.os.Build
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import dev.habittracker.shared.*
@@ -21,6 +24,8 @@ class IntegrationTest {
     @get:Rule val compose=createEmptyComposeRule()
     private val app get()=ApplicationProvider.getApplicationContext<HabitApplication>()
     private fun account(): Session {
+        if (Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
+            .grantRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@device.test","test-password-123"))
         app.preferences.save(session,TestServer.url)
         return session
@@ -82,6 +87,14 @@ class IntegrationTest {
         val file=repo.dao.files().single { it.noteId==noteId }
         assertTrue(file.uploaded)
         assertEquals("attachment-roundtrip",api.request("/api/v1/attachments/${file.id}").toString(Charsets.UTF_8))
+        val note=WireJson.decodeFromString<Item>(repo.dao.item(noteId)!!.localJson).content as NoteContent
+        val cachedCopy=File(checkNotNull(file.path))
+        assertTrue(cachedCopy.exists())
+        repo.save(note.copy(attachmentIds=emptyList()),noteId)
+        repo.synchronize()
+        assertNull(repo.dao.file(file.id))
+        assertFalse(cachedCopy.exists())
+        assertTrue(api.get<List<Attachment>>("/api/v1/notes/$noteId/attachments").isEmpty())
         val bob=account()
         try { repo.synchronize(); fail("Old repository must not send Alice's data with Bob's token") } catch(e: NetworkFailure) { assertEquals(401,e.status) }
         assertTrue(Api(TestServer.url) { bob.token }.get<List<Item>>("/api/v1/items").isEmpty())
@@ -125,12 +138,14 @@ class IntegrationTest {
             compose.onNodeWithText("Удалить аккаунт безвозвратно?").assertIsDisplayed()
             compose.onNodeWithText("Удалить аккаунт и данные").performClick()
             compose.waitUntil(15000) { app.preferences.current()==null }
-            compose.onNodeWithText("Войди, чтобы синхронизировать данные").assertIsDisplayed()
         }
         runBlocking(Dispatchers.IO) {
             assertEquals(401,try { Api(TestServer.url){session.token}.get<List<Item>>("/api/v1/items"); 200 } catch(e: NetworkFailure) { e.status })
             assertNull(app.repository())
             assertFalse(File(app.getDatabasePath("tracker-${session.userId}-${TestServer.url.hashCode().toUInt().toString(16)}.db").path).exists())
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000) { compose.onAllNodesWithText("Войди, чтобы синхронизировать данные").fetchSemanticsNodes().isNotEmpty() }
         }
     }
     @Test fun reconnectKeepsOfflineQueueFilesAndRejectsAnotherAccount()=runBlocking(Dispatchers.IO) {

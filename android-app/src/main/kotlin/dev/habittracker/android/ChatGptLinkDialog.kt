@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,6 +81,10 @@ fun ChatGptLinkDialog(vm: AppViewModel, account: Session, close: () -> Unit) {
                         )
                     }
                 }
+                Text(
+                    "В приложении ChatGPT на телефоне MCP пока недоступен. Чтобы перенести текст, выбери в ChatGPT «Поделиться → Habit Tracker», проверь черновик и сохрани его.",
+                    style = MaterialTheme.typography.bodySmall
+                )
                 error?.let { Text(it) }
             }
         },

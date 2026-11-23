@@ -29,11 +29,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val app=application as HabitApplication
     private val repository=MutableStateFlow(app.repository())
     val session=MutableStateFlow(app.preferences.current())
-    val items=repository.flatMapLatest { it?.items ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
-    val conflicts=repository.flatMapLatest { it?.conflicts ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
-    val files=repository.flatMapLatest { it?.files ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
-    val errors=repository.flatMapLatest { it?.errors ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),emptyList())
-    val pendingCount=repository.flatMapLatest { it?.dao?.observePendingCount() ?: flowOf(0) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),0)
+    val items=repository.flatMapLatest { it?.items ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),emptyList())
+    val conflicts=repository.flatMapLatest { it?.conflicts ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),emptyList())
+    val files=repository.flatMapLatest { it?.files ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),emptyList())
+    val errors=repository.flatMapLatest { it?.errors ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),emptyList())
+    val pendingCount=repository.flatMapLatest { it?.dao?.observePendingCount() ?: flowOf(0) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),0)
     val message=MutableStateFlow<String?>(null)
     val busy=MutableStateFlow(false)
     val syncStatus=MutableStateFlow("Подключение…")
@@ -225,10 +225,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
             cancelSocialLogin()
             WorkManager.getInstance(app).cancelAllWork()
-            app.deleteLocalAccountData()
+            val localData=app.detachLocalAccountData()
+            withContext(Dispatchers.Main) {
+                session.value=null
+                repository.value=null
+                kotlinx.coroutines.yield()
+            }
+            delay(120)
+            app.eraseLocalAccountData(localData)
             Reminders.clear(app)
-            session.value=null
-            repository.value=null
             TrackerWidget.updateAll(app)
             message.value="Аккаунт и облачные данные удалены"
         } finally { busy.value=false }

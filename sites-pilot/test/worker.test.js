@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { test } from "node:test";
 import worker from "../worker/index.js";
 
@@ -15,6 +18,19 @@ const publicTools = [
     "create_task", "create_habit", "create_note", "create_project", "propose_week_plan",
     "update_item", "complete_task", "mark_habit", "delete_item", "get_attachment",
 ];
+const draftPage = await readFile(fileURLToPath(new URL("../../web/task.js", import.meta.url)), "utf8");
+
+function renderDraft(fragment) {
+    const elements = new Map(["status", "task-title", "page-title", "open"].map(id =>
+        [id, { textContent: "", hidden: id === "open", href: "" }],
+    ));
+    const document = { getElementById(id) {
+        if (!elements.has(id)) elements.set(id, { textContent: "", hidden: id === "open", href: "" });
+        return elements.get(id);
+    } };
+    vm.runInNewContext(draftPage, { location: { hash: `#${fragment}` }, URLSearchParams, document });
+    return elements;
+}
 const catalog = { tools: [...publicTools, "internal_admin"].map(name => ({ name, inputSchema: { type: "object" }, annotations: { readOnlyHint: name.startsWith("get_") } })) };
 
 function request(method, params, options = {}) {
@@ -149,4 +165,33 @@ test("expired or ambiguous upstream results are not reported as successful", asy
     assert.equal(uncertain.result.isError, false);
     assert.match(uncertain.result.content[0].text, /тот же operation_id/);
     assert.equal(send.mock.callCount(), 4);
+});
+
+test("mobile task links still open an editable task draft", () => {
+    const open = renderDraft("title=Pay+internet&date=2026-12-01&time=18%3A00").get("open");
+    assert.equal(open.hidden, false);
+    const link = new URL(open.href);
+    assert.equal(link.protocol, "habittracker:");
+    assert.equal(link.pathname, "/task");
+    assert.equal(link.searchParams.get("title"), "Pay internet");
+    assert.equal(link.searchParams.get("time"), "18:00");
+});
+
+test("mobile note links open an editable note without account identifiers", () => {
+    const elements = renderDraft("kind=note&title=Project+idea&text=First+line%0ASecond+line");
+    assert.equal(elements.get("page-title").textContent, "Черновик заметки");
+    assert.equal(elements.get("status").textContent, "Проверь и сохрани заметку в приложении.");
+    const link = new URL(elements.get("open").href);
+    assert.equal(link.pathname, "/note");
+    assert.equal(link.searchParams.get("title"), "Project idea");
+    assert.equal(link.searchParams.get("text"), "First line\nSecond line");
+    assert.equal(link.searchParams.has("account"), false);
+});
+
+test("mobile draft page rejects unexpected and repeated fields", () => {
+    for (const fragment of [
+        "kind=note&title=Idea&text=body&account=other",
+        "kind=note&title=One&title=Two&text=body",
+        "title=Task&completed=true",
+    ]) assert.equal(renderDraft(fragment).get("open").hidden, true);
 });

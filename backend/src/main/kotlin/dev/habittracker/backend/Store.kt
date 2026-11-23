@@ -168,6 +168,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         }
     }
     fun purgeDeletedAccountFiles(directory: Path): Int = tx { c -> purgeAccountFiles(c, directory) }
+    fun queueUnlinkedAttachmentFiles(): Int = tx { c -> queueUnlinkedAttachmentFiles(c) }
 
     private fun issueOAuth(c: Connection,identity: Identity,clientId: String,resource: String): OAuthTokens {
         lockAccount(c, identity.userId)
@@ -307,9 +308,19 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         val page = changes.take(200)
         return SyncResponse(results,page,page.lastOrNull()?.sequence ?: request.cursor,changes.size > 200)
     }
-    fun attachments(userId: String, noteId: String): List<Attachment> = pool.connection.use { c -> c.prepareStatement("SELECT * FROM attachments WHERE user_id=?::uuid AND note_id=?::uuid").use {
-        it.setString(1,userId); it.setString(2,noteId); it.executeQuery().use { r -> buildList { while(r.next()) add(Attachment(r.getString("id"),r.getString("note_id"),r.getString("filename"),r.getString("media_type"),r.getLong("size"))) } }
-    } }
+    fun attachments(userId: String, noteId: String): List<Attachment> = pool.connection.use { c ->
+        val item=find(c,userId,noteId)?.takeIf { !it.deleted } ?: return@use emptyList()
+        val note=item.content as? NoteContent ?: return@use emptyList()
+        val referenced=note.attachmentIds.toSet()
+        c.prepareStatement("SELECT * FROM attachments WHERE user_id=?::uuid AND note_id=?::uuid").use {
+            it.setString(1,userId); it.setString(2,noteId); it.executeQuery().use { r -> buildList {
+                while(r.next()) {
+                    val id=r.getString("id")
+                    if(id in referenced) add(Attachment(id,r.getString("note_id"),r.getString("filename"),r.getString("media_type"),r.getLong("size")))
+                }
+            } }
+        }
+    }
     fun saveAttachment(userId: String, attachment: Attachment, storageKey: String, hash: String) = tx { c ->
         lockAccount(c, userId)
         val note = find(c,userId,attachment.noteId) ?: throw ApiFailure(404,"Заметка не найдена")

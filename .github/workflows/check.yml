@@ -36,10 +36,56 @@ jobs:
           java-version: '21'
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools'
-      - run: sdkmanager 'platforms;android-36.1' 'build-tools;36.0.0'
+          packages: 'platform-tools emulator'
+      - run: sdkmanager 'platforms;android-36.1' 'build-tools;36.0.0' 'system-images;android-36;google_apis;x86_64'
       - uses: gradle/actions/setup-gradle@v4
       - run: bash gradlew :android-app:assembleDebug :android-app:lintDebug
+      - name: Start disposable Android emulator
+        run: |
+          echo no | avdmanager create avd --force --name habit-ci --package 'system-images;android-36;google_apis;x86_64' --device pixel_2
+          emulator -avd habit-ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 &
+          adb wait-for-device
+          for attempt in $(seq 1 90); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then break; fi
+            sleep 2
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+      - name: Run Android integration tests against disposable backend
+        run: |
+          mkdir -p .local
+          bash gradlew :backend:runFeatureTests --no-daemon > "$RUNNER_TEMP/feature-backend.log" 2>&1 &
+          backend_pid=$!
+          cleanup() {
+            kill "$backend_pid" 2>/dev/null || true
+            wait "$backend_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:18082/readyz > /dev/null; then ready=true; break; fi
+            if ! kill -0 "$backend_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/feature-backend.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            cat "$RUNNER_TEMP/feature-backend.log"
+            exit 1
+          fi
+          bash gradlew :android-app:connectedDebugAndroidTest \
+            '-Pandroid.testInstrumentationRunnerArguments.backend_url=http://10.0.2.2:18082' \
+            '-Pandroid.testInstrumentationRunnerArguments.class=dev.habittracker.android.IntegrationTest,dev.habittracker.android.FeatureIntegrationTest'
+      - name: Upload Android integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: habit-tracker-android-instrumentation
+          path: android-app/build/outputs/androidTest-results/connected
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: habit-tracker-debug

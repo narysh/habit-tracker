@@ -97,6 +97,48 @@ class StoreTest {
             Files.deleteIfExists(dir)
         }
     }
+    @Test fun `unlinked and deleted note attachments are queued and removed without touching another account`() {
+        val owner = account()
+        val other = account()
+        val dir = Files.createTempDirectory("habit-attachment-gc-")
+        fun noteWithFile(userId: String, key: String): Pair<Item,Attachment> {
+            val fileId = UUID.randomUUID().toString()
+            val item = store.mutate(userId, mutation(NoteContent("Файл", attachmentIds = listOf(fileId)))).item!!
+            val attachment = Attachment(fileId, item.id, "note.txt", "text/plain", 1)
+            store.saveAttachment(userId, attachment, key, "test-hash")
+            Files.writeString(dir.resolve(key), "x")
+            return item to attachment
+        }
+        val removedKey = UUID.randomUUID().toString()
+        val keptKey = UUID.randomUUID().toString()
+        val deletedKey = UUID.randomUUID().toString()
+        val (note, removed) = noteWithFile(owner.userId, removedKey)
+        val (deletedNote, deleted) = noteWithFile(owner.userId, deletedKey)
+        val (_, kept) = noteWithFile(other.userId, keptKey)
+        try {
+            assertEquals(listOf(removed), store.attachments(owner.userId, note.id))
+            store.mutate(owner.userId, Mutation(UUID.randomUUID().toString(), note.id, note.version, NoteContent("Файл")))
+            assertTrue(store.attachments(owner.userId, note.id).isEmpty())
+            assertNull(store.attachment(owner.userId, removed.id))
+            assertEquals(1, store.queueUnlinkedAttachmentFiles())
+            assertNull(store.attachment(owner.userId, removed.id))
+            assertNotNull(store.attachment(other.userId, kept.id))
+            assertTrue(store.purgeDeletedAccountFiles(dir) >= 1)
+            assertFalse(Files.exists(dir.resolve(removed.id)))
+            assertTrue(Files.exists(dir.resolve(keptKey)))
+
+            store.mutate(owner.userId, Mutation(UUID.randomUUID().toString(), deletedNote.id, deletedNote.version, deletedNote.content, deleted = true))
+            assertTrue(store.attachments(owner.userId, deletedNote.id).isEmpty())
+            assertEquals(1, store.queueUnlinkedAttachmentFiles())
+            assertTrue(store.purgeDeletedAccountFiles(dir) >= 1)
+            assertFalse(Files.exists(dir.resolve(deletedKey)))
+        } finally {
+            Files.deleteIfExists(dir.resolve(removedKey))
+            Files.deleteIfExists(dir.resolve(deletedKey))
+            Files.deleteIfExists(dir.resolve(keptKey))
+            Files.deleteIfExists(dir)
+        }
+    }
     @Test fun `a concurrent OAuth refresh cannot leave valid credentials after account deletion`() {
         val owner = account()
         val identity = checkNotNull(store.authenticate(owner.token))
