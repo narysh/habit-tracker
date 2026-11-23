@@ -114,7 +114,11 @@ jobs:
             cat "$RUNNER_TEMP/feature-backend.log"
             exit 1
           fi
+          bash gradlew :android-app:connectedDebugAndroidTest --no-daemon \
+            '-Pandroid.testInstrumentationRunnerArguments.backend_url=http://10.0.2.2:18082' \
+            '-Pandroid.testInstrumentationRunnerArguments.class=dev.habittracker.android.FeatureIntegrationTest#reminderPermissionIsRequestedAfterSavingAndDeferringKeepsTheTask'
           bash gradlew :android-app:connectedDebugAndroidTest \
+            --no-daemon \
             '-Pandroid.testInstrumentationRunnerArguments.backend_url=http://10.0.2.2:18082' \
             '-Pandroid.testInstrumentationRunnerArguments.class=dev.habittracker.android.IntegrationTest,dev.habittracker.android.FeatureIntegrationTest'
       - name: Upload Android integration test results

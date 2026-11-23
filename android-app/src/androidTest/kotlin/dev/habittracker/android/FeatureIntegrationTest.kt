@@ -27,16 +27,16 @@ import java.util.zip.*
 class FeatureIntegrationTest {
     @get:Rule val compose=createEmptyComposeRule()
     private val app get()=ApplicationProvider.getApplicationContext<HabitApplication>()
-    private fun account(): Session {
-        if (Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
+    private fun account(grantNotificationPermission: Boolean = true): Session {
+        if (grantNotificationPermission && Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
             .grantRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@feature.android.test","test-password-123"))
         app.preferences.automatic(false);app.preferences.save(session,TestServer.url);return session
     }
     @Test fun reminderPermissionIsRequestedAfterSavingAndDeferringKeepsTheTask() {
         org.junit.Assume.assumeTrue(Build.VERSION.SDK_INT >= 33)
-        account()
-        InstrumentationRegistry.getInstrumentation().uiAutomation.revokeRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
+        org.junit.Assume.assumeTrue(ContextCompat.checkSelfPermission(app,Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_DENIED)
+        account(grantNotificationPermission=false)
         app.getSharedPreferences("reminder-settings",Context.MODE_PRIVATE).edit().remove("notification-permission-prompt-shown").commit()
         val title="Task with reminder without permission"
         val date=LocalDate.now().plusDays(1).format(DateTimeFormatter.ofPattern("dd.MM.uuuu"))
