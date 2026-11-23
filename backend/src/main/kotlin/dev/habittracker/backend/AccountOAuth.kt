@@ -5,15 +5,11 @@ import java.net.URLEncoder
 import java.time.Instant
 
 data class AuthorizationRequest(val redirect: String, val state: String, val challenge: String, val scopes: Set<String>, val expires: Instant)
-data class CodeGrant(val request: AuthorizationRequest, val identity: Identity)
 data class BrowserAuthorization(val nonce: String, val request: AuthorizationRequest, val appCode: String?)
+
+/** OAuth handshakes are persisted by Store, so any backend instance can finish them. */
 class AccountOAuth(private val settings: Settings, private val store: Store) {
-    private data class Pending(val request: AuthorizationRequest, val appCodeHash: String?, var approved: Identity? = null)
-    private val pending = mutableMapOf<String,Pending>()
-    private val codes = mutableMapOf<String,CodeGrant>()
-    @Synchronized fun begin(params: Map<String,String>): BrowserAuthorization {
-        prune()
-        require(pending.size < 100)
+    fun begin(params: Map<String,String>): BrowserAuthorization {
         require(params["client_id"] == settings.clientId && params["response_type"] == "code") { "Unknown client or response type" }
         val redirect = params["redirect_uri"].orEmpty(); require(redirect in settings.redirects) { "Unregistered redirect URI" }
         require(params["resource"] == settings.resource) { "Invalid resource" }
@@ -25,87 +21,80 @@ class AccountOAuth(private val settings: Settings, private val store: Store) {
         val request = AuthorizationRequest(redirect,state,challenge,scopes,Instant.now().plusSeconds(300))
         val nonce = secret()
         val appCode = if (settings.publicPlugin) secret().take(16) else null
-        pending[digest(nonce)] = Pending(request, appCode?.let(::digest))
+        store.createOAuthPending(digest(nonce), request, appCode?.let(::digest))
         return BrowserAuthorization(nonce, request, appCode)
     }
-    @Synchronized fun finish(nonce: String, identity: Identity?, allow: Boolean): String {
-        prune()
-        val key = digest(nonce)
-        val entry = pending[key] ?: throw IllegalArgumentException("Запрос подключения истёк")
-        require(!allow || entry.approved == null) { "Подключение уже подтверждено в приложении. Нажми «Завершить подключение»." }
-        if (allow && !store.accountExists(requireNotNull(identity).userId)) throw ApiFailure(401, "Войди в аккаунт")
-        pending.remove(key)
-        return redirect(entry.request, if (allow) identity else null)
+
+    fun finish(nonce: String, identity: Identity?, allow: Boolean): String {
+        val code = if (allow) secret() else null
+        val completed = store.finishOAuthPending(
+            digest(nonce),
+            if (allow) Store.OAuthPendingDecision.BROWSER_ALLOW else Store.OAuthPendingDecision.BROWSER_DENY,
+            if (allow) requireNotNull(identity).userId else null,
+            code?.let(::digest),
+            settings.clientId,
+            settings.resource,
+        ) ?: throw IllegalStateException("OAuth request was not completed")
+        return redirect(completed.request, code)
     }
-    @Synchronized fun previewAppLink(code: String): ChatGptLinkPreview {
+
+    fun previewAppLink(code: String): ChatGptLinkPreview {
         val entry = findAppLink(code)
         return ChatGptLinkPreview(entry.request.scopes, entry.request.expires.toString())
     }
-    @Synchronized fun approveAppLink(code: String, appToken: String) {
-        val identity = store.authenticate(appToken, appSessionOnly = true)
-            ?: throw ApiFailure(401, "Войди в Habit Tracker")
-        val entry = findAppLink(code)
-        require(identity.scopes.containsAll(entry.request.scopes)) { "Недостаточно прав для подключения" }
-        entry.approved = identity
+
+    fun approveAppLink(code: String, appToken: String) {
+        if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
+        store.approveOAuthPending(appCodeHash(code), appToken)
     }
-    @Synchronized fun finishAppLink(nonce: String): String? {
-        prune()
+
+    fun finishAppLink(nonce: String): String? {
         if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено")
-        val key = digest(nonce)
-        val entry = pending[key] ?: throw ApiFailure(410, "Запрос подключения истёк. Начни заново в ChatGPT.")
-        val identity = entry.approved ?: return null
-        pending.remove(key)
-        return redirect(entry.request, identity)
+        val code = secret()
+        val completed = store.finishOAuthPending(
+            digest(nonce), Store.OAuthPendingDecision.APP_FINISH, null, digest(code), settings.clientId, settings.resource
+        ) ?: return null
+        return redirect(completed.request, code)
     }
-    @Synchronized fun disconnect(userId: String) {
+
+    fun disconnect(userId: String) {
         if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
         store.revokeOAuthConnection(userId, settings.clientId, settings.resource)
-        removeGrants(userId)
     }
-    @Synchronized fun deleteAccount(userId: String, appToken: String) {
+
+    fun deleteAccount(userId: String, appToken: String) {
         store.deleteAccount(userId, appToken)
-        removeGrants(userId)
     }
-    private fun removeGrants(userId: String) {
-        pending.entries.removeIf { it.value.approved?.userId == userId }
-        codes.entries.removeIf { it.value.identity.userId == userId }
-    }
-    private fun findAppLink(code: String): Pending {
-        if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
-        prune()
+
+    private fun appCodeHash(code: String): String {
         val normalized = code.trim()
         require(Regex("[A-Za-z0-9_-]{16}").matches(normalized)) { "Введи код из 16 символов со страницы подключения" }
-        val hash = digest(normalized)
-        return pending.values.firstOrNull { it.appCodeHash == hash && it.approved == null }
+        return digest(normalized)
+    }
+
+    private fun findAppLink(code: String): OAuthPendingState {
+        if (!settings.publicPlugin) throw ApiFailure(404, "Подключение ChatGPT не настроено на этом сервере")
+        return store.oauthPendingByAppCode(appCodeHash(code))
             ?: throw ApiFailure(404, "Код неверный, уже использован или истёк")
     }
-    private fun redirect(request: AuthorizationRequest, identity: Identity?): String {
-        val parameter = if (identity != null) {
-            val code = secret()
-            codes[digest(code)] = CodeGrant(request.copy(expires=Instant.now().plusSeconds(60)),identity.copy(scopes=request.scopes))
-            "code=${encode(code)}"
-        } else "error=access_denied"
+
+    private fun redirect(request: AuthorizationRequest, code: String?): String {
+        val parameter = if (code != null) "code=${encode(code)}" else "error=access_denied"
         return request.redirect + (if('?' in request.redirect) "&" else "?") + parameter + "&state=${encode(request.state)}&iss=${encode(settings.publicUrl)}"
     }
-    @Synchronized fun exchange(params: Map<String,String>): OAuthTokens {
-        prune()
+
+    fun exchange(params: Map<String,String>): OAuthTokens {
         require(params["client_id"] == settings.clientId && equalSecrets(params["client_secret"].orEmpty(),settings.clientSecret))
         require(params["resource"] == settings.resource)
         if(params["grant_type"]=="refresh_token") return store.refreshOAuth(params["refresh_token"].orEmpty(),settings.clientId,settings.resource)
         require(params["grant_type"] == "authorization_code")
-        val key = digest(params["code"].orEmpty())
-        val grant = codes[key] ?: throw IllegalArgumentException("Invalid grant")
-        require(params["redirect_uri"] == grant.request.redirect)
-        val verifier = params["code_verifier"].orEmpty()
-        require(Regex("[A-Za-z0-9._~-]{43,128}").matches(verifier) && equalSecrets(challenge(verifier),grant.request.challenge))
-        codes.remove(key)
-        return store.issueOAuth(grant.identity,settings.clientId,settings.resource)
-    }
-    private fun prune() {
-        pending.entries.removeIf { !it.value.request.expires.isAfter(Instant.now()) }
-        codes.entries.removeIf { !it.value.request.expires.isAfter(Instant.now()) }
+        return store.redeemOAuthCode(
+            digest(params["code"].orEmpty()), settings.clientId, settings.resource,
+            params["redirect_uri"].orEmpty(), params["code_verifier"].orEmpty()
+        )
     }
 }
+
 fun encode(value: String): String = URLEncoder.encode(value,Charsets.UTF_8)
 fun escape(value: String): String = value.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;")
 

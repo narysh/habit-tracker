@@ -7,6 +7,7 @@ import org.flywaydb.core.Flyway
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.Timestamp
+import java.sql.Types
 import java.time.Instant
 import java.nio.file.Path
 import java.time.LocalDate
@@ -15,6 +16,9 @@ import java.util.Locale
 import java.util.UUID
 
 data class Identity(val userId: String, val email: String, val scopes: Set<String>)
+internal data class OAuthPendingState(val request: AuthorizationRequest, val approvedUserId: String?)
+internal data class OAuthPendingCompletion(val request: AuthorizationRequest, val userId: String?)
+private data class OAuthCodeState(val redirect: String, val challenge: String, val scopes: Set<String>, val userId: String, val clientId: String, val resource: String)
 class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable {
     val pool = HikariDataSource(HikariConfig().apply {
         this.jdbcUrl = jdbcUrl; this.username = username; this.password = password
@@ -142,6 +146,7 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         }
     }
     fun revokeOAuthConnection(userId: String, clientId: String, resource: String) = tx { c ->
+        lockAccount(c, userId)
         c.prepareStatement("""DELETE FROM sessions WHERE user_id=?::uuid AND token_hash IN (
             SELECT access_hash FROM oauth_refresh_tokens WHERE user_id=?::uuid AND client_id=? AND resource=?)""").use { statement ->
             statement.setString(1, userId)
@@ -150,7 +155,173 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             statement.setString(4, resource)
             statement.executeUpdate()
         }
+        c.prepareStatement("DELETE FROM oauth_authorization_requests WHERE approved_user_id=?::uuid").use { statement ->
+            statement.setString(1, userId); statement.executeUpdate()
+        }
+        c.prepareStatement("DELETE FROM oauth_authorization_codes WHERE user_id=?::uuid AND client_id=? AND resource=?").use { statement ->
+            statement.setString(1, userId); statement.setString(2, clientId); statement.setString(3, resource); statement.executeUpdate()
+        }
     }
+    fun createOAuthPending(nonceHash: String, request: AuthorizationRequest, appCodeHash: String?) = tx { c ->
+        c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended('habit_tracker.oauth_pending_limit',0))").use { it.execute() }
+        c.prepareStatement("DELETE FROM oauth_authorization_requests WHERE expires_at<=now()").use { it.executeUpdate() }
+        c.prepareStatement("DELETE FROM oauth_authorization_codes WHERE expires_at<=now()").use { it.executeUpdate() }
+        val count = c.prepareStatement("SELECT count(*) FROM oauth_authorization_requests WHERE expires_at>now()").use { statement ->
+            statement.executeQuery().use { rows -> rows.next(); rows.getLong(1) }
+        }
+        require(count < 100) { "Слишком много запросов подключения" }
+        c.prepareStatement("""INSERT INTO oauth_authorization_requests
+            (nonce_hash,redirect_uri,state,code_challenge,scopes,app_code_hash,expires_at)
+            VALUES (?,?,?,?,?,?,?)""").use { statement ->
+            statement.setString(1, nonceHash)
+            statement.setString(2, request.redirect)
+            statement.setString(3, request.state)
+            statement.setString(4, request.challenge)
+            statement.setString(5, request.scopes.sorted().joinToString(" "))
+            if (appCodeHash == null) statement.setNull(6, Types.VARCHAR) else statement.setString(6, appCodeHash)
+            statement.setTimestamp(7, Timestamp.from(request.expires))
+            statement.executeUpdate()
+        }
+    }
+
+    internal fun oauthPendingByAppCode(appCodeHash: String): OAuthPendingState? = pool.connection.use { c ->
+        c.prepareStatement("SELECT redirect_uri,state,code_challenge,scopes,approved_user_id,expires_at FROM oauth_authorization_requests WHERE app_code_hash=? AND approved_user_id IS NULL AND expires_at>now()").use { statement ->
+            statement.setString(1, appCodeHash)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.oauthPending() else null }
+        }
+    }
+
+    private fun ResultSet.oauthPending(): OAuthPendingState {
+        val scopes = getString("scopes").split(' ').filter(String::isNotEmpty).toSet()
+        return OAuthPendingState(
+            AuthorizationRequest(getString("redirect_uri"), getString("state"), getString("code_challenge"), scopes, getTimestamp("expires_at").toInstant()),
+            getString("approved_user_id")
+        )
+    }
+
+    fun approveOAuthPending(appCodeHash: String, appToken: String) = tx { c ->
+        val tokenHash = digest(appToken)
+        val identity = appIdentity(c, tokenHash) ?: throw ApiFailure(401, "Войди в Habit Tracker")
+        lockAccount(c, identity.userId)
+        // Recheck the app session after taking the account lock so revocation cannot race approval.
+        val currentIdentity = appIdentity(c, tokenHash) ?: throw ApiFailure(401, "Войди в Habit Tracker")
+        require(currentIdentity.userId == identity.userId)
+        val requestedScopes = c.prepareStatement("SELECT scopes FROM oauth_authorization_requests WHERE app_code_hash=? AND expires_at>now() AND approved_user_id IS NULL FOR UPDATE").use { statement ->
+            statement.setString(1, appCodeHash)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) rows.getString(1).split(' ').filter(String::isNotEmpty).toSet()
+                else throw ApiFailure(404, "Код неверный, уже использован или истёк")
+            }
+        }
+        require(currentIdentity.scopes.containsAll(requestedScopes)) { "Недостаточно прав для подключения" }
+        c.prepareStatement("UPDATE oauth_authorization_requests SET approved_user_id=?::uuid WHERE app_code_hash=? AND approved_user_id IS NULL AND expires_at>now()").use { statement ->
+            statement.setString(1, identity.userId); statement.setString(2, appCodeHash)
+            if (statement.executeUpdate() != 1) throw ApiFailure(404, "Код неверный, уже использован или истёк")
+        }
+    }
+
+    enum class OAuthPendingDecision { BROWSER_ALLOW, BROWSER_DENY, APP_FINISH }
+
+    internal fun finishOAuthPending(
+        nonceHash: String,
+        decision: OAuthPendingDecision,
+        browserUserId: String?,
+        codeHash: String?,
+        clientId: String,
+        resource: String,
+    ): OAuthPendingCompletion? = tx { c ->
+        val appFinishUserId = if (decision == OAuthPendingDecision.APP_FINISH) c.prepareStatement(
+            "SELECT approved_user_id::text FROM oauth_authorization_requests WHERE nonce_hash=? AND expires_at>now()"
+        ).use { statement ->
+            statement.setString(1, nonceHash)
+            statement.executeQuery().use { rows ->
+                if (!rows.next()) throw ApiFailure(410, "Запрос подключения истёк")
+                rows.getString(1)
+            }
+        } else null
+        val accountLockId = when (decision) {
+            OAuthPendingDecision.BROWSER_ALLOW -> requireNotNull(browserUserId)
+            OAuthPendingDecision.APP_FINISH -> appFinishUserId
+            OAuthPendingDecision.BROWSER_DENY -> null
+        }
+        accountLockId?.let { lockAccount(c, it) }
+        val row = c.prepareStatement("""SELECT redirect_uri,state,code_challenge,scopes,approved_user_id,expires_at
+            FROM oauth_authorization_requests WHERE nonce_hash=? AND expires_at>now() FOR UPDATE""").use { statement ->
+            statement.setString(1, nonceHash)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) rows.oauthPending() else throw ApiFailure(410, "Запрос подключения истёк")
+            }
+        }
+        val userId = when (decision) {
+            OAuthPendingDecision.BROWSER_DENY -> null
+            OAuthPendingDecision.BROWSER_ALLOW -> {
+                require(row.approvedUserId == null) { "Подключение уже подтверждено в приложении. Нажми «Завершить подключение»." }
+                val requestedUser = requireNotNull(browserUserId)
+                requestedUser
+            }
+            OAuthPendingDecision.APP_FINISH -> {
+                if (appFinishUserId == null || row.approvedUserId != appFinishUserId) return@tx null
+                appFinishUserId
+            }
+        }
+        if (userId != null) {
+            val hashedCode = requireNotNull(codeHash)
+            c.prepareStatement("""INSERT INTO oauth_authorization_codes
+                (code_hash,redirect_uri,code_challenge,scopes,user_id,client_id,resource,expires_at)
+                VALUES (?,?,?,?,?::uuid,?,?,now()+INTERVAL '60 seconds')""").use { statement ->
+                statement.setString(1, hashedCode); statement.setString(2, row.request.redirect)
+                statement.setString(3, row.request.challenge); statement.setString(4, row.request.scopes.sorted().joinToString(" "))
+                statement.setString(5, userId); statement.setString(6, clientId); statement.setString(7, resource)
+                statement.executeUpdate()
+            }
+        }
+        c.prepareStatement("DELETE FROM oauth_authorization_requests WHERE nonce_hash=?").use { statement ->
+            statement.setString(1, nonceHash)
+            if (statement.executeUpdate() != 1) throw ApiFailure(410, "Запрос подключения истёк")
+        }
+        OAuthPendingCompletion(row.request, userId)
+    }
+
+    private fun appIdentity(c: Connection, tokenHash: String): Identity? = c.prepareStatement("""SELECT u.id,u.email,s.scopes FROM sessions s
+        JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>now()
+        AND NOT EXISTS (SELECT 1 FROM oauth_refresh_tokens r WHERE r.access_hash=s.token_hash)""").use { statement ->
+        statement.setString(1, tokenHash)
+        statement.executeQuery().use { rows ->
+            if (rows.next()) Identity(rows.getString(1), rows.getString(2), rows.getString(3).split(' ').toSet()) else null
+        }
+    }
+
+    fun redeemOAuthCode(codeHash: String, clientId: String, resource: String, redirectUri: String, verifier: String): OAuthTokens = tx { c ->
+        val codeUserId = c.prepareStatement("SELECT user_id::text FROM oauth_authorization_codes WHERE code_hash=? AND expires_at>now()").use { statement ->
+            statement.setString(1, codeHash)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else throw ApiFailure(401, "Invalid grant") }
+        }
+        lockAccount(c, codeUserId)
+        val row = c.prepareStatement("""SELECT redirect_uri,code_challenge,scopes,user_id::text,client_id,resource
+            FROM oauth_authorization_codes WHERE code_hash=? AND expires_at>now() FOR UPDATE""").use { statement ->
+            statement.setString(1, codeHash)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) OAuthCodeState(
+                    rows.getString(1), rows.getString(2), rows.getString(3).split(' ').filter(String::isNotEmpty).toSet(),
+                    rows.getString(4), rows.getString(5), rows.getString(6)
+                ) else throw ApiFailure(401, "Invalid grant")
+            }
+        }
+        require(row.clientId == clientId && row.resource == resource) { "Invalid grant" }
+        require(row.userId == codeUserId) { "Invalid grant" }
+        require(redirectUri == row.redirect) { "Invalid grant" }
+        require(Regex("[A-Za-z0-9._~-]{43,128}").matches(verifier) && equalSecrets(challenge(verifier), row.challenge)) { "Invalid grant" }
+        c.prepareStatement("DELETE FROM oauth_authorization_codes WHERE code_hash=?").use { statement ->
+            statement.setString(1, codeHash)
+            if (statement.executeUpdate() != 1) throw ApiFailure(401, "Invalid grant")
+        }
+        val email = c.prepareStatement("SELECT email FROM users WHERE id=?::uuid").use { statement ->
+            statement.setString(1, row.userId)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else throw ApiFailure(401, "Invalid grant") }
+        }
+        issueOAuth(c, Identity(row.userId, email, row.scopes), clientId, resource)
+    }
+
     fun revoke(token: String) { tx { c ->
         val hash=digest(token)
         val access=c.prepareStatement("SELECT access_hash FROM oauth_refresh_tokens WHERE token_hash=?").use { it.setString(1,hash); it.executeQuery().use { r -> if(r.next()) r.getString(1) else null } }

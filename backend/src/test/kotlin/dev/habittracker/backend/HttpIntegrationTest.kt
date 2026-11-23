@@ -213,6 +213,99 @@ class HttpIntegrationTest {
         assertEquals(setOf("task","note","habit"),store.list(account.userId).map {it.content.typeName()}.toSet())
         assertTrue(store.list(user().userId).isEmpty())
     }
+
+    @Test fun `OAuth app approval survives coordinator recreation and authorization code is single use`() {
+        val plugin = settings.copy(publicPlugin = true, publicUrl = "https://tracker.example.test",
+            redirects = setOf("https://chatgpt.com/connector_platform_oauth_redirect"))
+        val owner = user()
+        val verifier = secret()
+        val authorizeParams = mapOf(
+            "client_id" to plugin.clientId,
+            "redirect_uri" to plugin.redirects.single(),
+            "response_type" to "code",
+            "state" to "restart-safe-state",
+            "code_challenge" to challenge(verifier),
+            "code_challenge_method" to "S256",
+            "resource" to plugin.resource,
+            "scope" to "tracker:read tracker:write",
+        )
+        val firstInstance = AccountOAuth(plugin, store)
+        val begun = firstInstance.begin(authorizeParams)
+        val secondStore = Store(pg.getJdbcUrl("postgres", "postgres"), "postgres", "")
+        val thirdStore = Store(pg.getJdbcUrl("postgres", "postgres"), "postgres", "")
+        try {
+            val restartedInstance = AccountOAuth(plugin, secondStore)
+            assertEquals(setOf("tracker:read", "tracker:write"), restartedInstance.previewAppLink(begun.appCode!!).scopes)
+            restartedInstance.approveAppLink(begun.appCode, owner.token)
+            val callback = restartedInstance.finishAppLink(begun.nonce)
+            assertNotNull(callback)
+            val code = java.net.URLDecoder.decode(java.net.URI(callback).rawQuery.split('&').single { it.startsWith("code=") }.substringAfter('='), Charsets.UTF_8)
+            val tokenParams = mapOf(
+                "client_id" to plugin.clientId,
+                "client_secret" to plugin.clientSecret,
+                "resource" to plugin.resource,
+                "grant_type" to "authorization_code",
+                "redirect_uri" to plugin.redirects.single(),
+                "code" to code,
+                "code_verifier" to verifier,
+            )
+            val tokens = restartedInstance.exchange(tokenParams)
+            assertEquals(owner.userId, secondStore.authenticatePlugin(tokens.accessToken, plugin.clientId, plugin.resource)?.userId)
+            assertFailsWith<ApiFailure> { AccountOAuth(plugin, thirdStore).exchange(tokenParams) }
+        } finally {
+            secondStore.close()
+            thirdStore.close()
+        }
+    }
+
+    @Test fun `OAuth disconnect and account deletion revoke pending and unredeemed grants`() {
+        val plugin = settings.copy(publicPlugin = true, publicUrl = "https://tracker.example.test",
+            redirects = setOf("https://chatgpt.com/connector_platform_oauth_redirect"))
+        val owner = user()
+        val oauth = AccountOAuth(plugin, store)
+        fun params(state: String, verifier: String) = mapOf(
+            "client_id" to plugin.clientId,
+            "redirect_uri" to plugin.redirects.single(),
+            "response_type" to "code",
+            "state" to state,
+            "code_challenge" to challenge(verifier),
+            "code_challenge_method" to "S256",
+            "resource" to plugin.resource,
+            "scope" to "tracker:read tracker:write",
+        )
+        fun codeFrom(url: String) = java.net.URLDecoder.decode(
+            java.net.URI(url).rawQuery.split('&').single { it.startsWith("code=") }.substringAfter('='), Charsets.UTF_8
+        )
+
+        val verifier = secret()
+        val browser = oauth.begin(params("disconnect-code", verifier))
+        val identity = checkNotNull(store.authenticate(owner.token))
+        val redirect = oauth.finish(browser.nonce, identity, true)
+        val code = codeFrom(redirect)
+        oauth.disconnect(owner.userId)
+        assertFailsWith<ApiFailure> {
+            oauth.exchange(mapOf("client_id" to plugin.clientId, "client_secret" to plugin.clientSecret,
+                "resource" to plugin.resource, "grant_type" to "authorization_code", "redirect_uri" to plugin.redirects.single(),
+                "code" to code, "code_verifier" to verifier))
+        }
+
+        val deleteVerifier = secret()
+        val deleteBrowser = oauth.begin(params("delete-code", deleteVerifier))
+        val deleteRedirect = oauth.finish(deleteBrowser.nonce, identity, true)
+        val deleteCode = codeFrom(deleteRedirect)
+
+        val appVerifier = secret()
+        val pending = oauth.begin(params("delete-pending", appVerifier))
+        oauth.approveAppLink(pending.appCode!!, owner.token)
+        oauth.deleteAccount(owner.userId, owner.token)
+        assertEquals(410, assertFailsWith<ApiFailure> { oauth.finishAppLink(pending.nonce) }.status)
+        assertFailsWith<ApiFailure> {
+            oauth.exchange(mapOf("client_id" to plugin.clientId, "client_secret" to plugin.clientSecret,
+                "resource" to plugin.resource, "grant_type" to "authorization_code", "redirect_uri" to plugin.redirects.single(),
+                "code" to deleteCode, "code_verifier" to deleteVerifier))
+        }
+    }
+
     @Test fun `read only OAuth session cannot mutate via REST or MCP`()=testApplication {
         application { backendModule(settings,store) }
         val account=user(); val token=store.newSession(Identity(account.userId,account.email,setOf("tracker:read")),1).token
