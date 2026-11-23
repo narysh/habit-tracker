@@ -4,7 +4,7 @@ $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $projectRoot
 New-Item -ItemType Directory -Force .local | Out-Null
-if([string]::IsNullOrWhiteSpace($env:GRADLE_USER_HOME)) { $env:GRADLE_USER_HOME=Join-Path $projectRoot '.local/gradle-user-home' }
+if([string]::IsNullOrWhiteSpace($env:GRADLE_USER_HOME)) { $env:GRADLE_USER_HOME=Join-Path $projectRoot '.local/gradle-home' }
 $config=Join-Path $projectRoot '.local/backend.env'
 function New-Secret {
     [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_')
