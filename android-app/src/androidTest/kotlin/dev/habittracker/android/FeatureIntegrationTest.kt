@@ -211,6 +211,48 @@ class FeatureIntegrationTest {
         }
         repo.database.close()
     }
+    @Test fun sharingHabitDirectiveCreatesHabitOnSelectedWeekdays()=runBlocking(Dispatchers.IO) {
+        val session=account();val repo=Repository(app,session,false)
+        app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(
+            Intent.EXTRA_TEXT,"Привычка: Бегать\nДни: вторник, четверг"
+        ))
+        val draft=app.shareInbox.drafts.value.single()
+        assertTrue(draft.autoSave);assertEquals(setOf(2,4),draft.habit?.weekdays)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            withTimeout(15000){while(repo.dao.item(draft.id)==null || app.shareInbox.drafts.value.isNotEmpty())delay(100)}
+            val habit=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as HabitContent
+            assertEquals("Бегать",habit.title);assertEquals(setOf(2,4),habit.weekdays)
+            compose.onNodeWithText("Бегать").assertIsDisplayed()
+        }
+        repo.database.close()
+    }
+    @Test fun sharingHabitWeeklyTargetParsesTargetWithoutGuessingDays()=runBlocking(Dispatchers.IO) {
+        app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(
+            Intent.EXTRA_TEXT,"Привычка: Растяжка\nЦель: 3 дня в неделю"
+        ))
+        val draft=app.shareInbox.drafts.value.single()
+        assertTrue(draft.autoSave)
+        assertEquals(HabitMode.WEEKLY_TARGET,draft.habit?.mode)
+        assertEquals(3,draft.habit?.targetPerWeek)
+        app.shareInbox.remove(draft.id)
+    }
+    @Test fun sharingHabitWithUnknownScheduleRequiresReview()=runBlocking(Dispatchers.IO) {
+        val session=account();val repo=Repository(app,session,false)
+        app.shareInbox.drafts.value.toList().forEach {app.shareInbox.remove(it.id)}
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(
+            Intent.EXTRA_TEXT,"Привычка: Бегать\nДни: когда будет время"
+        ))
+        val draft=app.shareInbox.drafts.value.single()
+        assertFalse(draft.autoSave);assertTrue(draft.habit?.weekdays.isNullOrEmpty());assertNotNull(draft.reviewWarning)
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15000){compose.onAllNodesWithText(draft.reviewWarning!!).fetchSemanticsNodes().isNotEmpty()}
+            assertNull(repo.dao.item(draft.id))
+        }
+        app.shareInbox.remove(draft.id)
+        repo.database.close()
+    }
     @Test fun cancellingAiPlanDoesNotMoveTaskAndConfirmationAppliesIt() {
         val session=account();val api=Api(TestServer.url){session.token};val monday=LocalDate.now().with(java.time.temporal.TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
         val id=UUID.randomUUID().toString();val task=api.post<Mutation,MutationResult>("/api/v1/mutations",Mutation(UUID.randomUUID().toString(),id,0,TaskContent("Задача плана",dueDate=monday.toString()))).item!!

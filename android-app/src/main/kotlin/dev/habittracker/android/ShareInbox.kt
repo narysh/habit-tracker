@@ -6,6 +6,8 @@ import android.provider.OpenableColumns
 import dev.habittracker.shared.WireJson
 import dev.habittracker.shared.TaskContent
 import dev.habittracker.shared.NoteContent
+import dev.habittracker.shared.HabitContent
+import dev.habittracker.shared.HabitMode
 import dev.habittracker.shared.parseQuickTask
 import dev.habittracker.shared.TASK_DRAFT_PAGE
 import dev.habittracker.shared.contentDraftFromLink
@@ -13,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.Serializable
 import java.io.File
 import java.util.UUID
+import java.util.Locale
 import java.time.ZoneId
 
 @Serializable data class SharedFile(val path: String,val name: String,val mime: String)
@@ -24,6 +27,8 @@ import java.time.ZoneId
     val task: TaskContent? = null,
     val note: NoteContent? = null,
     val autoSave: Boolean = false,
+    val habit: HabitContent? = null,
+    val reviewWarning: String? = null,
 )
 class ShareInbox(private val context: Context) {
     private val directory=File(context.filesDir,"incoming").apply {mkdirs()}
@@ -83,6 +88,39 @@ class ShareInbox(private val context: Context) {
             val task = parsed?.content?.copy(description = description)
                 ?: TaskContent(titleAndDate, description = description, zoneId = zone)
             return SharedDraft("", task.title, task.description, emptyList(), task = task, autoSave = parsed?.warnings?.isEmpty() == true)
+        }
+
+        val habitHeader = Regex("(?i)^(?:[-*•]\\s*)?(?:(?:создай|добавь|запиши)\\s+(?:мне\\s+)?)?(?:привычка|привычку|habit)\\s*[:—-]\\s*(.+)$")
+            .matchEntire(header)
+        if (habitHeader != null && files.isEmpty()) {
+            val zone = ZoneId.systemDefault().id
+            val title = habitHeader.groupValues[1].trim()
+            val metadata = lines.mapIndexedNotNull { index, line ->
+                val value = line.trim()
+                if (index > headerIndex && (value.startsWith("Дни:", ignoreCase = true) || value.startsWith("Цель:", ignoreCase = true))) index to value else null
+            }
+            val daysLine = metadata.singleOrNull()?.second?.takeIf { it.startsWith("Дни:", ignoreCase = true) }
+            val targetLine = metadata.singleOrNull()?.second?.takeIf { it.startsWith("Цель:", ignoreCase = true) }
+            val russianDays = mapOf("понедельник" to 1, "вторник" to 2, "среда" to 3, "четверг" to 4, "пятница" to 5, "суббота" to 6, "воскресенье" to 7)
+            val parsedDays = daysLine?.substringAfter(':')?.trim()?.split(Regex("\\s*(?:,|и)\\s*"))
+                ?.takeIf { it.isNotEmpty() && it.all { day -> day.lowercase(Locale.ROOT) in russianDays } }
+                ?.map { russianDays.getValue(it.lowercase(Locale.ROOT)) }?.toSet()
+            val target = targetLine?.let { Regex("(?i)^Цель:\\s*([1-7])\\s+д(?:ень|ня|ней)\\s+в\\s+неделю$").matchEntire(it)?.groupValues?.get(1)?.toInt() }
+            val scheduleValid = title.isNotBlank() && metadata.size == 1 &&
+                ((parsedDays?.isNotEmpty() == true && targetLine == null) || (target != null && daysLine == null))
+            val description = lines.drop(headerIndex + 1)
+                .filterNot { it.trim().startsWith("Дни:", ignoreCase = true) || it.trim().startsWith("Цель:", ignoreCase = true) }
+                .joinToString("\n").trim()
+            val startsOn = java.time.LocalDate.now(ZoneId.of(zone)).toString()
+            val habit = if (target != null) {
+                HabitContent(title, description, HabitMode.WEEKLY_TARGET, targetPerWeek = target, startsOn = startsOn, zoneId = zone)
+            } else {
+                HabitContent(title, description, HabitMode.WEEKDAYS, weekdays = parsedDays ?: emptySet(), startsOn = startsOn, zoneId = zone)
+            }
+            return SharedDraft(
+                "", title, description, emptyList(), autoSave = scheduleValid, habit = habit,
+                reviewWarning = if (scheduleValid) null else "Расписание не распознано. Укажи дни недели или цель в днях за неделю и проверь привычку перед сохранением.",
+            )
         }
 
         val noteHeader = Regex("(?i)^(?:[-*•]\\s*)?(?:(?:сохрани|создай|добавь|запиши)\\s+(?:мне\\s+)?)?(?:заметка|заметку|note)\\s*[:—-]\\s*(.*)$")

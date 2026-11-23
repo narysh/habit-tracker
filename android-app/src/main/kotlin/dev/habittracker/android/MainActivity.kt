@@ -48,7 +48,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import java.util.UUID
 
-private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, ответь коротким текстом, который начинается с «Задача:». Добавляй срок и время только если я их назвал; не придумывай их. Когда я прошу сохранить заметку, выдай «Заметка: Заголовок» с текстом заметки на следующих строках. Не добавляй вступление и Markdown-ссылки. Я отправлю этот ответ через системное «Поделиться → Habit Tracker»; выбранная задача или заметка сохранится сразу."""
+private val mobileChatGptInstructions = """Когда я прошу создать задачу в Habit Tracker, ответь коротким текстом, начинающимся с «Задача:». Добавляй срок и время только если я их назвал; не придумывай их. Когда я прошу сохранить заметку, ответь «Заметка: Заголовок», а текст заметки помести на следующих строках. Когда я прошу создать привычку, ответь «Привычка: Название», а на следующей строке укажи «Дни: вторник, четверг» либо «Цель: 3 дня в неделю». Используй только названное мной расписание; если я не уточнил дни или цель, задай вопрос. Не добавляй вступление и Markdown. Я отправлю ответ через «Поделиться → Habit Tracker»; выбранная запись появится сразу."""
 
 class MainActivity : ComponentActivity() {
     private fun receive(intent: Intent) {
@@ -134,7 +134,7 @@ private fun Content.description(): String = when(this) {
     LaunchedEffect(autoSaveDraft?.id, session?.userId) {
         if (session != null && autoSaveDraft != null) {
             val asTask = autoSaveDraft.task != null
-            vm.acceptShare(autoSaveDraft, asTask) { tab = if (asTask) 1 else 3 }
+            vm.acceptShare(autoSaveDraft, asTask) { tab = when { asTask -> 1; autoSaveDraft.habit != null -> 2; else -> 3 } }
         }
     }
     LaunchedEffect(shortcut,session?.userId){if(shortcut && session!=null){feature="quick";vm.app.shortcut.value=false}}
@@ -214,9 +214,9 @@ private fun Content.description(): String = when(this) {
     }
     selectedPlan?.let {snapshot->val current=records.firstOrNull {it.id==snapshot.id} ?: snapshot;PlanDialog(current,records,busy,{selectedPlan=null}){vm.applyPlan(current){selectedPlan=null}}}
     if (session != null && editor == null && selectedPlan == null && feature == null && !settings && !connection && !chatGptLink && !socialSettings) incoming.firstOrNull()?.takeUnless { it.autoSave }?.let { draft ->
-        val content = draft.task ?: draft.note
+        val content = draft.task ?: draft.habit ?: draft.note
         if (content == null) ShareDraftDialog(draft, busy, { value, asTask -> vm.acceptShare(value, asTask) }, { vm.app.shareInbox.remove(draft.id) })
-        else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) })
+        else Editor(draft.id, content, files, vm, { vm.app.shareInbox.remove(draft.id) }, { openRecord(it) }, draft.reviewWarning)
     }
     if(chooser) AlertDialog(onDismissRequest={chooser=false},title={Text("Добавить")},text={Column { listOf("Задачу","Привычку","Заметку").forEachIndexed { index,label -> TextButton(onClick={chooser=false;newItem(index+1)}) { Text(label) } } }},confirmButton={TextButton(onClick={chooser=false}) {Text("Закрыть")}})
     editor?.let { (id,content) -> Editor(id,content,files,vm,{editor=null},{openRecord(it)}) }
@@ -333,7 +333,7 @@ private fun Content.description(): String = when(this) {
     val count=(ChronoUnit.DAYS.between(LocalDate.parse(habit.startsOn),today)+1).coerceIn(0,100000).toInt()
     AlertDialog(onDismissRequest=close,title={Text("История: ${habit.title}")},text={LazyColumn(Modifier.heightIn(max=420.dp)) { items(count) { index -> val date=today.minusDays(index.toLong()); Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) { Text(date.format(dateFormat),Modifier.weight(1f)); if(habit.isDue(date)) Checkbox(date.toString() in marks,{mark(date,it)}) else Text("Выходной",style=MaterialTheme.typography.labelSmall) } } }},confirmButton={TextButton(onClick=close) {Text("Готово")}})
 }
-@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit) {
+@Composable private fun Editor(id: String,initial: Content,files: List<LocalFile>,vm: AppViewModel,close: ()->Unit,openLinked: (Item)->Unit,notice: String? = null) {
     var title by remember(id) { mutableStateOf(initial.title) }
     var body by remember(id) { mutableStateOf(when(initial) { is TaskContent -> initial.description; is NoteContent -> initial.text; is HabitContent -> initial.description; is ProjectContent -> initial.description; else -> "" }) }
     var date by remember(id) { mutableStateOf(localDate((initial as? TaskContent)?.dueDate)) }
@@ -359,6 +359,7 @@ private fun Content.description(): String = when(this) {
     fun submit(after: ()->Unit) { try { val value=content();value.validate();vm.save(value,id,after) } catch(e: Exception) { error=e.message ?: "Проверь поля формы" } }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.attach(id,it) } }
     AlertDialog(onDismissRequest=close,title={Text(if(initial is TaskContent) "Задача" else if(initial is HabitContent) "Привычка" else if(initial is ProjectContent) "Проект или цель" else "Заметка")},text={Column(Modifier.heightIn(max=500.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+        notice?.let { Text(it, color=MaterialTheme.colorScheme.error) }
         OutlinedTextField(title,{title=it},label={Text("Название")},modifier=Modifier.fillMaxWidth())
         OutlinedTextField(body,{body=it},label={Text(if(initial is NoteContent) "Текст" else "Описание")},minLines=3,modifier=Modifier.fillMaxWidth())
         if(initial is ProjectContent) Row(verticalAlignment=Alignment.CenterVertically) { Switch(goal,{goal=it});Text("Это цель") }
@@ -399,8 +400,8 @@ private fun Content.description(): String = when(this) {
         title = { Text("Импорт из ChatGPT на телефоне") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. Когда ChatGPT сформулирует задачу или заметку, выбери в меню ответа «Поделиться → Habit Tracker» — запись сразу появится в приложении.")
-                Text("В мобильном ChatGPT выбери «Поделиться → Habit Tracker». Если ответ начинается с «Задача:» или «Заметка:», запись появится сразу после отправки. Старые ссылки открывают черновик для проверки.", style = MaterialTheme.typography.bodySmall)
+                Text("Мобильное приложение ChatGPT пока не подключает пользовательский MCP. Скопируй инструкцию в ChatGPT → Настройки → Пользовательские инструкции. Когда ChatGPT сформулирует задачу, заметку или привычку, выбери в меню ответа «Поделиться → Habit Tracker» — запись сразу появится в приложении.")
+                Text("В мобильном ChatGPT выбери «Поделиться → Habit Tracker». Ответ с «Задача:», «Заметка:» или «Привычка:» сохранится сразу; нераспознанное расписание откроется для проверки. Ссылки на задачи и заметки тоже сохраняются при открытии.", style = MaterialTheme.typography.bodySmall)
                 Text(mobileChatGptInstructions, style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Habit Tracker", mobileChatGptInstructions))

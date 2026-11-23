@@ -199,12 +199,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val repo=repository.value ?: error("Сначала войди в аккаунт")
             if(repo.dao.item(draft.id)==null) {
-                val content = draft.task ?: if(asTask) TaskContent(draft.title.trim(),description=draft.text,zoneId=ZoneId.systemDefault().id) else draft.note ?: NoteContent(draft.title.trim(),draft.text)
+                val content = draft.task ?: draft.habit ?: if(asTask) TaskContent(draft.title.trim(),description=draft.text,zoneId=ZoneId.systemDefault().id) else draft.note ?: NoteContent(draft.title.trim(),draft.text)
                 repo.save(content,draft.id)
                 draft.files.forEachIndexed {index,file->val id=UUID.nameUUIDFromBytes("share:${draft.id}:$index".toByteArray()).toString();repo.attach(draft.id,Uri.fromFile(java.io.File(file.path)),file.name,file.mime,id)}
             }
             app.shareInbox.remove(draft.id)
-            message.value=if(draft.task!=null || asTask) "Задача добавлена" else "Заметка добавлена"
+            message.value=when { draft.task!=null || asTask -> "Задача добавлена"; draft.habit!=null -> "Привычка добавлена"; else -> "Заметка добавлена" }
             withContext(Dispatchers.Main) { after() }
         } finally {busy.value=false}
     }
