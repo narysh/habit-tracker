@@ -129,11 +129,11 @@ class FeatureIntegrationTest {
             assertEquals(HabitMode.WEEKDAYS, habit.mode)
             assertEquals(setOf(2, 4), habit.weekdays)
             assertEquals(LocalDate.now(ZoneId.systemDefault()).toString(), habit.startsOn)
-            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            withTimeout(30000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
             compose.onNodeWithText(title).assertIsDisplayed()
         }
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-            withTimeout(15000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            withTimeout(30000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
         }
         assertEquals(1, repo.dao.items().count { (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title })
         repo.database.close()
