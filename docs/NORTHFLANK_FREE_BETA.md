@@ -2,7 +2,7 @@
 
 Эта схема подходит для демонстрации и закрытых технических проверок без карты: backend работает на Northflank Sandbox, а PostgreSQL и вложения — в отдельном бесплатном проекте Neon. Northflank прямо не рекомендует Sandbox для production-приложений. Здесь нет production SLA, гарантий доступности и гарантированного резервного восстановления. План включает до $20 ресурсов Northflank в месяц; не переключайся на Pay as you go и не добавляй карту. Проверяй Usage и актуальные ограничения в аккаунте. [Тариф Northflank](https://northflank.com/pricing), [ограничения бесплатного тарифа](https://northflank.com/docs/v1/application/billing/pricing-on-northflank)
 
-Neon Free ограничен 100 CU-часами, 1 ГБ PostgreSQL и 5 ГБ объектного хранилища на проект. База автоматически приостанавливается после периода простоя (по умолчанию пять минут) и может проснуться с небольшой задержкой. Это подходит для демонстрации и закрытой беты с малой нагрузкой, не для хранения единственной копии важных данных. [Лимиты Neon Free](https://neon.com/blog/neon-free-plan-1-gb-per-project), [автоприостановка Neon](https://neon.com/blog/new-usage-based-pricing)
+Neon Free ограничен 100 CU-часами, 1 ГБ PostgreSQL и 5 ГБ объектного хранилища на проект. База автоматически приостанавливается после периода простоя (по умолчанию пять минут) и может проснуться с небольшой задержкой. Это дополнительное ограничение демо, не храни здесь единственную копию важных данных. [Лимиты Neon Free](https://neon.com/blog/neon-free-plan-1-gb-per-project), [автоприостановка Neon](https://neon.com/blog/new-usage-based-pricing)
 
 ## 1. Подготовь Neon
 
@@ -65,14 +65,24 @@ Northflank ставит `X-Envoy-External-Address` на публичных HTTP-
 
 Переменные Google и Яндекса добавляй только после создания OAuth-клиентов с точными callback URL из [инструкции по соцвходу](SOCIAL_AUTH.md). Вход по email и паролю работает без них. VK требует отдельного приложения и не считается настроенным.
 
-Сохрани переменные и запусти сервис. После появления статуса **Live** проверь `https://<origin>/health`, `/readyz` и `/.well-known/oauth-authorization-server`. Анонимный запрос к `/mcp` должен вернуть `401`, не данные.
+Сохрани переменные и запусти сервис. После появления статуса **Live** проверь ответы:
+
+```powershell
+$origin = "https://точное-имя-сервиса.code.run"
+Invoke-RestMethod "$origin/health"
+Invoke-RestMethod "$origin/readyz"
+Invoke-RestMethod "$origin/.well-known/oauth-authorization-server"
+curl.exe -i -X POST "$origin/mcp" -H "Content-Type: application/json" --data "{}"
+```
+
+Последняя команда без токена должна получить `401`, не данные.
 
 ## 5. Подключи Android и ChatGPT
 
 Для внутренней проверки собери debug APK, указав полученный HTTPS origin:
 
 ```powershell
-.\gradlew.bat :android-app:assembleDebug -PhabitTrackerOrigin=https://<your-service>.code.run
+.\gradlew.bat :android-app:assembleDebug "-PhabitTrackerOrigin=$origin"
 ```
 
 Debug APK не является подписанным релизом. Для распространения нужен постоянный ключ подписи и production-проверки; см. [сборку релиза](ANDROID_RELEASE.md).
