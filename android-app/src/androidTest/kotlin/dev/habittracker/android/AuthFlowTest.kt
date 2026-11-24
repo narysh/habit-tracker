@@ -3,6 +3,7 @@ package dev.habittracker.android
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import dev.habittracker.shared.Credentials
@@ -26,6 +27,8 @@ class AuthFlowTest {
         val password = "valid-password-123"
 
         ActivityScenario.launch(MainActivity::class.java).use {
+            lateinit var vm: AppViewModel
+            it.onActivity { activity -> vm=ViewModelProvider(activity)[AppViewModel::class.java] }
             compose.waitUntil(15_000) {
                 compose.onAllNodesWithText("Нет аккаунта? Зарегистрироваться").fetchSemanticsNodes().isNotEmpty()
             }
@@ -36,18 +39,16 @@ class AuthFlowTest {
             compose.onNodeWithTag("login-email").performTextInput("not-an-email")
             compose.onNodeWithTag("login-password").performTextInput(password)
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
-            compose.waitUntil(10_000) {
-                compose.onAllNodesWithText("Некорректный email").fetchSemanticsNodes().isNotEmpty()
-            }
+            compose.waitUntil(10_000) { vm.authError.value=="Некорректный email" }
+            compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Некорректный email")
 
             compose.onNodeWithTag("login-email").performTextClearance()
             compose.onNodeWithTag("login-email").performTextInput(email)
             compose.onNodeWithTag("login-password").performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput("short")
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
-            compose.waitUntil(10_000) {
-                compose.onAllNodesWithText("Пароль: от 10 до 128 символов").fetchSemanticsNodes().isNotEmpty()
-            }
+            compose.waitUntil(10_000) { vm.authError.value=="Пароль: от 10 до 128 символов" }
+            compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Пароль: от 10 до 128 символов")
 
             compose.onNodeWithTag("login-password").performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput(password)

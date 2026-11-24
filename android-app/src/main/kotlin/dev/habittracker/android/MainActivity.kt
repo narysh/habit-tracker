@@ -366,7 +366,7 @@ private fun Content.description(): String = when(this) {
             modifier=Modifier.fillMaxWidth().testTag("login-password")
         )
         SocialButtons(vm,false)
-        authError?.let { Text(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium) }
+        authError?.let { Text(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium,modifier=Modifier.testTag("auth-error")) }
         TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }
         if(advanced) OutlinedTextField(url,{url=it;vm.manualAddress(it)},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
         else Text(if(url.isBlank()) connectionStatus else "Сервер подключён автоматически",style=MaterialTheme.typography.bodySmall)
