@@ -254,7 +254,15 @@ class FeatureIntegrationTest {
             assertEquals(HabitMode.WEEKDAYS, habit.mode)
             assertEquals(setOf(2, 4), habit.weekdays)
             assertEquals(LocalDate.now(ZoneId.systemDefault()).toString(), habit.startsOn)
-            withTimeout(30000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
+            withTimeout(30000) {
+                while (app.shareInbox.drafts.value.isNotEmpty() && activityViewModel.get().message.value == null) delay(100)
+            }
+            assertEquals(
+                "Habit link save did not finish cleanly; drafts=${app.shareInbox.drafts.value}",
+                "Привычка добавлена",
+                activityViewModel.get().message.value,
+            )
+            assertTrue("Saved habit must be removed from the incoming drafts", app.shareInbox.drafts.value.isEmpty())
             compose.onNodeWithText(title).assertIsDisplayed()
         }
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
