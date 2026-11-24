@@ -201,8 +201,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if(repo.dao.item(draft.id)==null) {
                 val content = draft.task ?: draft.habit ?: if(asTask) TaskContent(draft.title.trim(),description=draft.text,zoneId=ZoneId.systemDefault().id) else draft.note ?: NoteContent(draft.title.trim(),draft.text)
                 repo.save(content,draft.id)
-                draft.files.forEachIndexed {index,file->val id=UUID.nameUUIDFromBytes("share:${draft.id}:$index".toByteArray()).toString();repo.attach(draft.id,Uri.fromFile(java.io.File(file.path)),file.name,file.mime,id)}
             }
+            // Keep attachment retries independent from note creation: a failed copy must not
+            // leave a record that causes the next attempt to skip the remaining files.
+            val existing=repo.dao.item(draft.id)
+            if(draft.files.isNotEmpty()) {
+                val item=existing?.let { WireJson.decodeFromString<Item>(it.localJson) }
+                require(item!=null && !item.deleted && item.content is NoteContent) { "Заметку с вложениями не удалось найти. Черновик сохранён для повтора." }
+            }
+            draft.files.forEachIndexed {index,file->val id=UUID.nameUUIDFromBytes("share:${draft.id}:$index".toByteArray()).toString();repo.attach(draft.id,Uri.fromFile(java.io.File(file.path)),file.name,file.mime,id)}
             app.shareInbox.remove(draft.id)
             message.value=when { draft.task!=null || asTask -> "Задача добавлена"; draft.habit!=null -> "Привычка добавлена"; else -> "Заметка добавлена" }
             withContext(Dispatchers.Main) { after() }

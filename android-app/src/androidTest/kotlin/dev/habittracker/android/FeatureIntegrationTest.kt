@@ -11,6 +11,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.core.content.ContextCompat
 import dev.habittracker.shared.*
 import kotlinx.coroutines.*
@@ -42,6 +45,55 @@ class FeatureIntegrationTest {
         assertTrue("attachment referenced by a saved draft must remain",referenced.exists())
         inbox.remove(draft.id)
         files.deleteRecursively()
+    }
+    @Test fun retryingSharedNoteFinishesAfterPartialAttachmentFailure()=runBlocking(Dispatchers.IO) {
+        Assume.assumeTrue(Build.VERSION.SDK_INT>=29)
+        account()
+        app.shareInbox.drafts.value.toList().forEach { app.shareInbox.remove(it.id) }
+        val resolver=app.contentResolver
+        fun insert(name: String, text: String): Uri {
+            val uri=resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME,name)
+                put(MediaStore.MediaColumns.MIME_TYPE,"text/plain")
+                put(MediaStore.MediaColumns.RELATIVE_PATH,Environment.DIRECTORY_DOWNLOADS)
+            })!!
+            resolver.openOutputStream(uri)!!.use { it.write(text.toByteArray()) }
+            return uri
+        }
+        val first=insert("share-first-${UUID.randomUUID()}.txt","first attachment")
+        val second=insert("share-second-${UUID.randomUUID()}.txt","second attachment")
+        app.shareInbox.receive(Intent(Intent.ACTION_SEND_MULTIPLE).setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT,"Заметка: Повтор вложений")
+            .putParcelableArrayListExtra(Intent.EXTRA_STREAM,arrayListOf(first,second))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        resolver.delete(first,null,null);resolver.delete(second,null,null)
+        val draft=app.shareInbox.drafts.value.single()
+        val secondCopy=File(draft.files[1].path)
+        assertTrue(secondCopy.delete())
+
+        val owner=object: ViewModelStoreOwner { override val viewModelStore=ViewModelStore() }
+        try {
+            val vm=ViewModelProvider(owner,ViewModelProvider.AndroidViewModelFactory.getInstance(app))
+                .get(AppViewModel::class.java)
+            val repo=app.repository()!!
+            vm.acceptShare(draft,false)
+            withTimeout(15000) { while(vm.busy.value || vm.message.value==null) delay(50) }
+            val partial=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
+            assertEquals(1,partial.attachmentIds.size)
+            assertEquals(draft.id,app.shareInbox.drafts.value.single().id)
+
+            secondCopy.writeText("second attachment")
+            vm.message.value=null
+            vm.acceptShare(draft,false)
+            withTimeout(15000) { while(vm.busy.value || vm.message.value==null) delay(50) }
+            assertEquals("Заметка добавлена",vm.message.value)
+            val completed=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
+            assertEquals(2,completed.attachmentIds.size)
+            assertEquals(1,repo.dao.items().count { WireJson.decodeFromString<Item>(it.localJson).id==draft.id })
+            assertTrue(app.shareInbox.drafts.value.isEmpty())
+        } finally {
+            owner.viewModelStore.clear()
+        }
     }
     private fun account(grantNotificationPermission: Boolean = true): Session {
         if (grantNotificationPermission && Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
