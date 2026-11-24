@@ -35,6 +35,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val errors=repository.flatMapLatest { it?.errors ?: flowOf(emptyList()) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),emptyList())
     val pendingCount=repository.flatMapLatest { it?.dao?.observePendingCount() ?: flowOf(0) }.stateIn(viewModelScope,SharingStarted.WhileSubscribed(0),0)
     val message=MutableStateFlow<String?>(null)
+    val authError=MutableStateFlow<String?>(null)
     val busy=MutableStateFlow(false)
     val syncStatus=MutableStateFlow("Подключение…")
     val serverUrl=MutableStateFlow(app.preferences.url())
@@ -144,6 +145,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun login(url: String,email: String,password: String,register: Boolean) {
         busy.value=true
+        authError.value=null
         action {
             try {
                 val automatic=app.preferences.automatic()
@@ -152,6 +154,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 UUID.fromString(result.userId)
                 app.preferences.save(result,normalized,automatic=automatic)
                 repository.value=app.repository(); session.value=result; periodic(); synchronize()
+            } catch(e: CancellationException) {
+                throw e
+            } catch(e: Exception) {
+                authError.value=e.message ?: "Не удалось войти в аккаунт"
             } finally { busy.value=false }
         }
     }

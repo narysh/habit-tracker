@@ -347,6 +347,7 @@ private fun Content.description(): String = when(this) {
     var url by rememberSaveable { mutableStateOf(vm.app.preferences.url()) }; var register by rememberSaveable { mutableStateOf(false) }
     val busy by vm.busy.collectAsStateWithLifecycle()
     val connectionStatus by vm.syncStatus.collectAsStateWithLifecycle()
+    val authError by vm.authError.collectAsStateWithLifecycle()
     val connectedUrl by vm.serverUrl.collectAsStateWithLifecycle()
     var advanced by rememberSaveable { mutableStateOf(!vm.app.preferences.automatic()) }
     LaunchedEffect(connectedUrl) { if(!advanced) url=connectedUrl }
@@ -354,10 +355,10 @@ private fun Content.description(): String = when(this) {
         Spacer(Modifier.height(42.dp)); Text("Habit Tracker",style=MaterialTheme.typography.headlineLarge,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
         Text("Задачи, заметки и привычки",style=MaterialTheme.typography.titleLarge)
         Text(if(register) "Создай свой аккаунт" else "Войди, чтобы синхронизировать данные")
-        OutlinedTextField(email,{email=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth().testTag("login-email"))
+        OutlinedTextField(email,{email=it;vm.authError.value=null},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth().testTag("login-email"))
         OutlinedTextField(
             value=password,
-            onValueChange={password=it},
+            onValueChange={password=it;vm.authError.value=null},
             label={Text("Пароль${if(register) " — от 10 символов" else ""}")},
             visualTransformation=if(passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon={TextButton(onClick={passwordVisible=!passwordVisible}) { Text(if(passwordVisible) "Скрыть" else "Показать") }},
@@ -365,11 +366,12 @@ private fun Content.description(): String = when(this) {
             modifier=Modifier.fillMaxWidth().testTag("login-password")
         )
         SocialButtons(vm,false)
+        authError?.let { Text(it,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium) }
         TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }
         if(advanced) OutlinedTextField(url,{url=it;vm.manualAddress(it)},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
         else Text(if(url.isBlank()) connectionStatus else "Сервер подключён автоматически",style=MaterialTheme.typography.bodySmall)
         Button(onClick={vm.login(url,email,password,register)},enabled=!busy && url.isNotBlank() && email.isNotBlank() && password.isNotBlank(),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login-submit")) { Text(if(busy) "Подключение…" else if(register) "Создать аккаунт" else "Войти") }
-        TextButton(onClick={register=!register}) {Text(if(register) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться")}
+        TextButton(onClick={register=!register;vm.authError.value=null}) {Text(if(register) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться")}
         Text("В первой версии email используется как логин. Подтверждение почты и восстановление пароля пока недоступны.",style=MaterialTheme.typography.bodySmall)
     }
 }
