@@ -47,7 +47,7 @@ fun main() {
     val store = Store(settings.jdbcUrl,settings.dbUser,settings.dbPassword)
     embeddedServer(Netty,host="0.0.0.0",port=settings.port) { backendModule(settings,store) }.start(wait=true)
 }
-fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store), loginThrottle: LoginThrottle = LoginThrottle()) {
+fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store,stateEncryptionKey=settings.socialStateEncryptionKey), loginThrottle: LoginThrottle = LoginThrottle()) {
     val logger = environment.log
     val oauth = AccountOAuth(settings,store)
     val attachmentStorage = settings.createAttachmentStorage()

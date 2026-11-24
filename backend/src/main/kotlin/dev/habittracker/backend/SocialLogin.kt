@@ -6,8 +6,6 @@ import java.net.URI
 import java.net.URLEncoder
 import java.net.http.*
 import java.time.Duration
-import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 
 internal const val VK_ID_ORIGIN = "https://id.vk.ru"
 
@@ -58,12 +56,13 @@ class ProviderGateway(private val vkIdOrigin: String = VK_ID_ORIGIN) {
     }
 }
 
-class SocialLogin(private val store: Store,val configs: Map<String,ProviderConfig> = environment(),private val exchange: (ProviderConfig,String,String,String,String?)->ProviderPerson = ProviderGateway()::exchange) {
-    private class Pending(val config: ProviderConfig,val challenge: String,val linkUser: String?,val linkToken: String?,val verifier: String=secret(),val expires: Instant=Instant.now().plusSeconds(300)) {
-        var consumed=false
-        @Volatile var result: SocialResult?=null
-    }
-    private val pending=ConcurrentHashMap<String,Pending>()
+class SocialLogin(
+    private val store: Store,
+    val configs: Map<String,ProviderConfig> = environment(),
+    stateEncryptionKey: ByteArray,
+    private val exchange: (ProviderConfig,String,String,String,String?)->ProviderPerson = ProviderGateway()::exchange,
+) {
+    private val stateCipher=SocialStateCipher(stateEncryptionKey)
     fun providers(identity: Identity?): List<SocialProviderInfo> {
         val linked=identity?.let { store.linkedProviders(it.userId) }.orEmpty()
         return listOf("google" to "Google","vk" to "VK","yandex" to "Яндекс").map { (id,title)->SocialProviderInfo(id,title,id in configs,id in linked) }
@@ -72,50 +71,40 @@ class SocialLogin(private val store: Store,val configs: Map<String,ProviderConfi
         require(Regex("[A-Za-z0-9_-]{43}").matches(request.challenge))
         if(request.link && identity==null) throw ApiFailure(401,"Войди перед привязкой")
         val config=configs[request.provider] ?: throw ApiFailure(503,"Вход через этого провайдера ещё не настроен владельцем сервера")
-        pending.entries.removeIf { it.value.expires<Instant.now() }
-        if(pending.size>=1000) throw ApiFailure(429,"Слишком много попыток входа")
-        val id=secret();val attempt=Pending(config,request.challenge,if(request.link) identity!!.userId else null,if(request.link) token else null)
-        pending[id]=attempt
+        val id=secret();val providerVerifier=secret()
+        val linkUser=if(request.link) identity!!.userId else null
+        val linkSession=if(request.link) token?.let(::digest) ?: throw ApiFailure(401,"Войди перед привязкой") else null
+        val stateHash=digest(id)
+        store.createSocialAttempt(stateHash,config.id,request.challenge,stateCipher.encrypt(providerVerifier,"$stateHash:${config.id}"),linkUser,linkSession)
         val authorize=when(config.id){"google"->"https://accounts.google.com/o/oauth2/v2/auth";"vk"->"$VK_ID_ORIGIN/authorize";else->"https://oauth.yandex.ru/authorize"}
         val scope=when(config.id){"google"->"openid email";"vk"->"vkid.personal_info email";else->"login:email login:info"}
-        val query=mapOf("response_type" to "code","client_id" to config.clientId,"redirect_uri" to config.callback,"scope" to scope,"state" to id,"code_challenge" to challenge(attempt.verifier),"code_challenge_method" to if(config.id=="vk") "s256" else "S256")
+        val query=mapOf("response_type" to "code","client_id" to config.clientId,"redirect_uri" to config.callback,"scope" to scope,"state" to id,"code_challenge" to challenge(providerVerifier),"code_challenge_method" to if(config.id=="vk") "s256" else "S256")
         return SocialAttempt(id,"$authorize?${form(query)}")
     }
     fun callback(provider: String,state: String,code: String?,error: String?,device: String?) {
-        val attempt=pending[state] ?: throw ApiFailure(400,"Попытка входа не найдена")
-        synchronized(attempt) {
-            if(attempt.expires<Instant.now() || attempt.consumed || attempt.config.id!=provider) throw ApiFailure(400,"Попытка входа истекла или уже использована")
-            attempt.consumed=true
-            attempt.result=try {
-                if(error!=null || code.isNullOrBlank()) SocialResult("FAILED",message="Вход отменён у провайдера")
-                else {
-                    if(attempt.linkUser!=null && store.authenticate(attempt.linkToken.orEmpty())?.userId!=attempt.linkUser) throw ApiFailure(401,"Сессия привязки отозвана. Войди и повтори попытку.")
-                    require(code.length<=4096)
-                    val person=exchange(attempt.config,code,attempt.verifier,state,device)
-                    val identity=store.socialIdentity(provider,person.subject,person.email,attempt.linkUser)
-                    if(attempt.linkUser!=null) SocialResult("LINKED") else SocialResult("DONE",store.newSession(identity))
-                }
-            } catch(e: ApiFailure) { SocialResult("FAILED",message=e.message) }
-              catch(_: Exception) { SocialResult("FAILED",message="Не удалось подтвердить вход. Попробуй снова.") }
+        val stateHash=digest(state)
+        val attempt=store.claimSocialCallback(stateHash,provider)
+        if(error!=null || code.isNullOrBlank()) {
+            store.failSocialCallback(stateHash,attempt.callbackClaim,"Вход отменён у провайдера")
+            return
+        }
+        try {
+            require(code.length<=4096)
+            val config=configs[provider] ?: throw ApiFailure(503,"Вход через этого провайдера ещё не настроен владельцем сервера")
+            val person=exchange(config,code,stateCipher.decrypt(attempt.providerVerifierCiphertext,"$stateHash:$provider"),state,device)
+            if(!store.completeSocialCallback(stateHash,attempt.callbackClaim,person)) throw ApiFailure(410,"Попытка входа истекла")
+        } catch(e: ApiFailure) {
+            store.failSocialCallback(stateHash,attempt.callbackClaim,e.message)
+        } catch(_: Exception) {
+            store.failSocialCallback(stateHash,attempt.callbackClaim,"Не удалось подтвердить вход. Попробуй снова.")
         }
     }
     fun poll(request: SocialPoll): SocialResult {
-        val attempt=pending[request.id] ?: throw ApiFailure(410,"Попытка входа истекла")
-        synchronized(attempt) {
-            if(attempt.expires<Instant.now()){pending.remove(request.id);throw ApiFailure(410,"Попытка входа истекла")}
-            if(!equalSecrets(challenge(request.verifier),attempt.challenge)) throw ApiFailure(403,"Неверный ключ попытки")
-            val result=attempt.result ?: return SocialResult("WAITING")
-            pending.remove(request.id)
-            if (result.session?.let { store.authenticate(it.token, appSessionOnly = true) == null } == true) {
-                throw ApiFailure(410, "Попытка входа больше не действует")
-            }
-            return result
-        }
+        require(request.verifier.length in 43..128)
+        return store.pollSocialAttempt(digest(request.id),request.verifier)
     }
     fun removeAttemptsForAccount(userId: String) {
-        pending.entries.removeIf { (_, attempt) ->
-            attempt.linkUser == userId || attempt.result?.session?.userId == userId
-        }
+        store.removeSocialAttemptsForAccount(userId)
     }
     companion object {
         fun environment(): Map<String,ProviderConfig> {

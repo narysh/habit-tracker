@@ -68,6 +68,7 @@ class FeatureIntegrationTest {
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
         resolver.delete(first,null,null);resolver.delete(second,null,null)
         val draft=app.shareInbox.drafts.value.single()
+        val firstCopy=File(draft.files[0].path)
         val secondCopy=File(draft.files[1].path)
         assertTrue(secondCopy.delete())
 
@@ -81,6 +82,8 @@ class FeatureIntegrationTest {
             val partial=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
             assertEquals(1,partial.attachmentIds.size)
             assertEquals(draft.id,app.shareInbox.drafts.value.single().id)
+            assertTrue("A failed attachment must not discard the inbox draft's retry source",firstCopy.exists())
+            assertEquals("first attachment",firstCopy.readText())
 
             secondCopy.writeText("second attachment")
             vm.message.value=null
@@ -89,6 +92,9 @@ class FeatureIntegrationTest {
             assertEquals("Заметка добавлена",vm.message.value)
             val completed=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
             assertEquals(2,completed.attachmentIds.size)
+            val savedCopies=completed.attachmentIds.map { id->File(requireNotNull(repo.dao.file(id)?.path)) }
+            assertEquals(listOf("first attachment","second attachment"),savedCopies.map(File::readText))
+            assertTrue("Inbox source copies are removed only after all attachments are durably copied",draft.files.none { File(it.path).exists() })
             assertEquals(1,repo.dao.items().count { WireJson.decodeFromString<Item>(it.localJson).id==draft.id })
             assertTrue(app.shareInbox.drafts.value.isEmpty())
         } finally {
@@ -400,6 +406,34 @@ class FeatureIntegrationTest {
             val note=WireJson.decodeFromString<Item>(repo.dao.item(draft.id)!!.localJson).content as NoteContent
             assertEquals("https://example.com/article",note.text)
             assertEquals("shared-private-copy",File(repo.dao.file(note.attachmentIds.single())!!.path!!).readText())
+        }
+        repo.database.close()
+    }
+    @Test fun noteSearchFindsAttachmentNameAndStillFindsNoteText()=runBlocking(Dispatchers.IO) {
+        Assume.assumeTrue(Build.VERSION.SDK_INT>=29)
+        val session=account();val repo=Repository(app,session,false)
+        val noteId=UUID.randomUUID().toString()
+        val fileName="search-attachment-${UUID.randomUUID()}.txt"
+        val uri=app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME,fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE,"text/plain")
+            put(MediaStore.MediaColumns.RELATIVE_PATH,Environment.DIRECTORY_DOWNLOADS)
+        })!!
+        app.contentResolver.openOutputStream(uri)!!.use { it.write("attachment search fixture".toByteArray()) }
+        repo.save(NoteContent("Заметка для поиска", "Редкая фраза внутри заметки"),noteId,notify=false)
+        repo.attach(noteId,uri,fileName,"text/plain",notify=false)
+        app.contentResolver.delete(uri,null,null)
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15_000) { compose.onAllNodesWithText("Заметки").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Заметки").performClick()
+            compose.onNodeWithText("Найти заметку").performTextInput("редкая фраза")
+            compose.waitUntil(10_000) { compose.onAllNodesWithText("Заметка для поиска").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Заметка для поиска").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Найти заметку").performTextClearance()
+            compose.onNodeWithText("Найти заметку").performTextInput(fileName)
+            compose.waitUntil(10_000) { compose.onAllNodesWithText("Заметка для поиска").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Заметка для поиска").performScrollTo().assertIsDisplayed()
         }
         repo.database.close()
     }

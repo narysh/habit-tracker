@@ -17,13 +17,14 @@ import kotlin.test.*
 class SocialLoginTest {
     private lateinit var pg: EmbeddedPostgres
     private lateinit var store: Store
+    private val stateKey=ByteArray(32) { 0x5a }
     @BeforeAll fun start(){pg=EmbeddedPostgres.builder().setPort(0).start();store=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")}
     @AfterAll fun stop(){store.close();pg.close()}
     private fun config(provider: String)=ProviderConfig(provider,provider,"test-client","test-secret","https://app.test/auth/social/$provider/callback")
     @Test fun `all provider adapters bind state and both PKCE keys and consume results once`() {
         for(provider in listOf("google","vk","yandex")) {
             val subject=UUID.randomUUID().toString();val verifier=secret()
-            val social=SocialLogin(store,mapOf(provider to config(provider))) { cfg,code,serverVerifier,state,device ->
+            val social=SocialLogin(store,mapOf(provider to config(provider)),stateKey) { cfg,code,serverVerifier,state,device ->
                 assertEquals(provider,cfg.id);assertEquals("provider-code",code);assertTrue(serverVerifier.length>=43);assertTrue(state.isNotBlank());assertEquals("device",device)
                 ProviderPerson(subject,null)
             }
@@ -94,7 +95,7 @@ class SocialLoginTest {
         assertNull(store.checkPassword(Credentials(fresh.email,"test-password-123")))
     }
     @Test fun `disabled provider anonymous linking provider mixup and denial do not issue a session`() {
-        val verifier=secret();val social=SocialLogin(store,mapOf("google" to config("google"))) {_,_,_,_,_->error("Exchange must not run")}
+        val verifier=secret();val social=SocialLogin(store,mapOf("google" to config("google")),stateKey) {_,_,_,_,_->error("Exchange must not run")}
         assertFailsWith<ApiFailure>{social.start(SocialStart("vk",challenge(verifier)),null)}
         assertFailsWith<ApiFailure>{social.start(SocialStart("google",challenge(verifier),true),null)}
         val attempt=social.start(SocialStart("google",challenge(verifier)),null)
@@ -136,7 +137,7 @@ class SocialLoginTest {
     @Test fun `link callback requires the original session to remain valid`() {
         val account=store.register(Credentials("${UUID.randomUUID()}@social.test","test-password-123"))
         val subject=UUID.randomUUID().toString()
-        val social=SocialLogin(store,mapOf("google" to config("google"))) {_,_,_,_,_->ProviderPerson(subject,null)}
+        val social=SocialLogin(store,mapOf("google" to config("google")),stateKey) {_,_,_,_,_->ProviderPerson(subject,null)}
         val verifier=secret()
         val attempt=social.start(SocialStart("google",challenge(verifier),true),store.authenticate(account.token),account.token)
         store.revoke(account.token)
@@ -149,6 +150,70 @@ class SocialLoginTest {
         assertEquals("LINKED",social.poll(SocialPoll(next.id,verifier)).status)
         assertEquals(setOf("google"),store.linkedProviders(account.userId))
     }
+    @Test fun `social callback and one time poll survive separate Store and SocialLogin instances`() {
+        val secondStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
+        val thirdStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
+        val exchangeCount=java.util.concurrent.atomic.AtomicInteger()
+        try {
+            val verifier=secret()
+            val first=SocialLogin(store,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->
+                exchangeCount.incrementAndGet();ProviderPerson("multi-${UUID.randomUUID()}",null)
+            }
+            val second=SocialLogin(secondStore,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->
+                exchangeCount.incrementAndGet();ProviderPerson("multi-${UUID.randomUUID()}",null)
+            }
+            val third=SocialLogin(thirdStore,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->error("poll must not exchange provider code") }
+            val attempt=first.start(SocialStart("google",challenge(verifier)),null)
+            assertTrue(secondStore.pool.connection.use { c ->
+                c.prepareStatement("SELECT provider_verifier_ciphertext FROM social_login_attempts WHERE state_hash=?").use { p ->
+                    p.setString(1,digest(attempt.id));p.executeQuery().use { r -> r.next() && r.getBytes(1).size==71 }
+                }
+            })
+            second.callback("google",attempt.id,"provider-code",null,null)
+            assertFailsWith<ApiFailure> { first.callback("google",attempt.id,"provider-code",null,null) }
+            assertEquals(1,exchangeCount.get())
+            val result=third.poll(SocialPoll(attempt.id,verifier))
+            assertEquals("DONE",result.status)
+            assertNotNull(secondStore.authenticate(result.session!!.token))
+            assertFailsWith<ApiFailure> { first.poll(SocialPoll(attempt.id,verifier)) }
+        } finally { secondStore.close();thirdStore.close() }
+    }
+
+    @Test fun `parallel polls across stores issue exactly one login session`() {
+        val secondStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
+        val verifier=secret()
+        try {
+            val first=SocialLogin(store,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->ProviderPerson("parallel-${UUID.randomUUID()}",null) }
+            val second=SocialLogin(secondStore,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->error("poll must not exchange") }
+            val attempt=first.start(SocialStart("google",challenge(verifier)),null)
+            first.callback("google",attempt.id,"provider-code",null,null)
+            val gate=java.util.concurrent.CountDownLatch(1)
+            val executor=java.util.concurrent.Executors.newFixedThreadPool(2)
+            try {
+                val futures=listOf(first,second).map { login -> executor.submit<SocialResult?> {
+                    gate.await()
+                    try { login.poll(SocialPoll(attempt.id,verifier)) } catch (_: ApiFailure) { null }
+                } }
+                gate.countDown()
+                val outcomes=futures.map { it.get() }
+                assertEquals(1,outcomes.count { it?.status=="DONE" })
+                assertEquals(1,outcomes.count { it==null })
+            } finally { executor.shutdownNow() }
+        } finally { secondStore.close() }
+    }
+
+    @Test fun `expired social state rejects callback and poll on another store`() {
+        val secondStore=Store(pg.getJdbcUrl("postgres","postgres"),"postgres","")
+        try {
+            val login=SocialLogin(store,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->error("expired state must not exchange") }
+            val verifier=secret();val attempt=login.start(SocialStart("google",challenge(verifier)),null)
+            store.pool.connection.use { c -> c.prepareStatement("UPDATE social_login_attempts SET expires_at=now()-INTERVAL '1 second' WHERE state_hash=?").use { p->p.setString(1,digest(attempt.id));p.executeUpdate() } }
+            val restarted=SocialLogin(secondStore,mapOf("google" to config("google")),stateKey) { _,_,_,_,_->error("expired state must not exchange") }
+            assertEquals(400,assertFailsWith<ApiFailure>{restarted.callback("google",attempt.id,"provider-code",null,null)}.status)
+            assertEquals(410,assertFailsWith<ApiFailure>{restarted.poll(SocialPoll(attempt.id,verifier))}.status)
+        } finally { secondStore.close() }
+    }
+
     private fun decodeForm(value: String)=value.split('&').filter(String::isNotEmpty).associate { pair ->
         val parts=pair.split('=',limit=2)
         URLDecoder.decode(parts[0],StandardCharsets.UTF_8) to URLDecoder.decode(parts.getOrElse(1){""},StandardCharsets.UTF_8)

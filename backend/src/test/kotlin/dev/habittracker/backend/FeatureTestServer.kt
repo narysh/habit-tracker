@@ -21,5 +21,5 @@ fun main(){
     val store=Store(settings.jdbcUrl,settings.dbUser,"")
     Files.writeString(Path.of(".local/feature-test-server.pid"),ProcessHandle.current().pid().toString())
     Runtime.getRuntime().addShutdownHook(Thread {store.close();pg.close()})
-    embeddedServer(Netty,host="127.0.0.1",port=18082){backendModule(settings,store,SocialLogin(store,emptyMap()),LoginThrottle(maxAttemptsPerMinute=500))}.start(wait=true)
+    embeddedServer(Netty,host="127.0.0.1",port=18082){backendModule(settings,store,SocialLogin(store,emptyMap(),settings.socialStateEncryptionKey),LoginThrottle(maxAttemptsPerMinute=500))}.start(wait=true)
 }

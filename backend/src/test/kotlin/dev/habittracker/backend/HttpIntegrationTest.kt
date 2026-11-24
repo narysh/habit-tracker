@@ -81,7 +81,7 @@ class HttpIntegrationTest {
             redirects = setOf("https://chatgpt.com/connector_platform_oauth_redirect"))
         val config = ProviderConfig("google", "Google", "fake-id", "fake-secret", "https://tracker.example.test/provider-callback")
         val subject = UUID.randomUUID().toString()
-        val social = SocialLogin(store, mapOf("google" to config)) { _, _, _, _, _ -> ProviderPerson(subject, null) }
+        val social = SocialLogin(store, mapOf("google" to config),plugin.socialStateEncryptionKey) { _, _, _, _, _ -> ProviderPerson(subject, null) }
         application { backendModule(plugin, store, social) }
         val verifier = secret()
         val signIn = social.start(SocialStart("google", challenge(verifier)), null)

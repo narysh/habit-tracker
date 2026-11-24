@@ -214,10 +214,15 @@ private fun Content.description(): String = when(this) {
                     Column(Modifier.fillMaxWidth().padding(22.dp)) { Text("Твой день — в твоём ритме",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold); Spacer(Modifier.height(8.dp)); Text("${countLabel(tasks.count { !(it.content as TaskContent).completed },"задача","задачи","задач")} в работе · ${countLabel(habits.size,"привычка","привычки","привычек")}") }
                 } }
                 item { Row { TextButton(onClick={feature="quick"}) {Text("Быстрый ввод")}; TextButton(onClick={feature="week"}) {Text("План недели")} } }
-                item { SectionTitle("На сегодня") }
-                val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && (task.dueDate==null || LocalDate.parse(task.dueDate)<=task.todayAt(now)) }
-                if(todayTasks.isEmpty()) item { EmptyState("Нет незавершённых задач на сегодня") }
+                item { SectionTitle("На сегодня и просрочено") }
+                val todayTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && task.dueDate?.let { due -> LocalDate.parse(due)<=task.todayAt(now) }==true }
+                if(todayTasks.isEmpty()) item { EmptyState("Нет просроченных задач и задач на сегодня") }
                 items(todayTasks,key={it.id}) { item -> TaskCard(item,{vm.complete(item,it)},{editor=item.id to item.content},{deleting=item}) }
+                val undatedTasks=tasks.filter { val task=it.content as TaskContent; !task.completed && task.dueDate==null }
+                if(undatedTasks.isNotEmpty()) {
+                    item { SectionTitle("Без срока") }
+                    items(undatedTasks,key={"undated-${it.id}"}) { item -> TaskCard(item,{vm.complete(item,it)},{editor=item.id to item.content},{deleting=item}) }
+                }
                 item { SectionTitle("Привычки") }
                 if(habits.none { val habit=it.content as HabitContent; habit.isDue(habit.todayAt(now)) }) item {EmptyState("Нет привычек на сегодня")}
                 items(habits.filter { val habit=it.content as HabitContent; habit.isDue(habit.todayAt(now)) },key={it.id}) { item -> HabitCard(item,visible,now,{date,checked->vm.mark(item,date,checked)},{editor=item.id to item.content},{deleting=item},{history=item}) }
@@ -232,7 +237,12 @@ private fun Content.description(): String = when(this) {
             }
             if(tab==3) {
                 item { OutlinedTextField(query,{query=it},label={Text("Найти заметку")},singleLine=true,modifier=Modifier.fillMaxWidth(),leadingIcon={Icon(Icons.Outlined.Search,null)}) }
-                val notes=visible.filter { val note=it.content as? NoteContent; note!=null && (note.title.contains(query,true)||note.text.contains(query,true)) }.sortedByDescending { it.updatedAt }
+                val attachmentNames=files.associate { it.id to it.name }
+                val notes=visible.filter { item ->
+                    val note=item.content as? NoteContent
+                    note!=null && (note.title.contains(query,true) || note.text.contains(query,true) ||
+                        note.attachmentIds.any { id -> attachmentNames[id]?.contains(query,true)==true })
+                }.sortedByDescending { it.updatedAt }
                 if(notes.isEmpty()) item { EmptyState(if(query.isBlank()) "Место для мыслей, идей и файлов" else "Ничего не найдено") }
                 items(notes,key={it.id}) { item ->
                     val note=item.content as NoteContent

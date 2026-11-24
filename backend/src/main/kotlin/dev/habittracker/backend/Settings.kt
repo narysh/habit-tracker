@@ -23,6 +23,8 @@ data class Settings(
     val connectionKeyMaterial: ConnectionKeyMaterial? = null,
 ) {
     val resource get() = "$publicUrl/mcp"
+    /** Derived from the existing stable server secret so local and hosted setups need no new setting. */
+    val socialStateEncryptionKey: ByteArray get() = dev.habittracker.backend.socialStateEncryptionKey(clientSecret)
     fun createAttachmentStorage(): AttachmentStorage =
         s3Storage?.let { S3AttachmentStorage(it) } ?: LocalFilesystemAttachmentStorage(files)
 

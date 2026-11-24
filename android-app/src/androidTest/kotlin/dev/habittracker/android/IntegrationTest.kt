@@ -17,6 +17,8 @@ import org.junit.Assert.*
 import org.junit.runner.RunWith
 import java.io.File
 import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -117,6 +119,26 @@ class IntegrationTest {
             compose.waitUntil(15000) { compose.onAllNodesWithText("Задача из Compose").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Задача из Compose").assertIsDisplayed()
         }
+    }
+    @Test fun todaySeparatesUndatedTasksFromDeadlineTasks() {
+        account()
+        val repo=app.repository()!!
+        val today=LocalDate.now(ZoneId.systemDefault())
+        runBlocking(Dispatchers.IO) {
+            repo.save(TaskContent("Просроченная задача",dueDate=today.minusDays(1).toString()),notify=false)
+            repo.save(TaskContent("Задача на сегодня",dueDate=today.toString()),notify=false)
+            repo.save(TaskContent("Задача без срока"),notify=false)
+            repo.save(TaskContent("Будущая задача",dueDate=today.plusDays(1).toString()),notify=false)
+        }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            compose.waitUntil(15_000) { compose.onAllNodesWithText("На сегодня и просрочено").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Просроченная задача").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Задача на сегодня").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Без срока").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Задача без срока").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Будущая задача").assertDoesNotExist()
+        }
+        repo.database.close()
     }
     @Test fun accountDeletionRequiresConfirmationAndRemovesAccountData() {
         val session=runBlocking(Dispatchers.IO) {

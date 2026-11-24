@@ -19,6 +19,15 @@ data class Identity(val userId: String, val email: String, val scopes: Set<Strin
 internal data class OAuthPendingState(val request: AuthorizationRequest, val approvedUserId: String?)
 internal data class OAuthPendingCompletion(val request: AuthorizationRequest, val userId: String?)
 private data class OAuthCodeState(val redirect: String, val challenge: String, val scopes: Set<String>, val userId: String, val clientId: String, val resource: String)
+internal data class ClaimedSocialAttempt(
+    val provider: String,
+    val clientChallenge: String,
+    val providerVerifierCiphertext: ByteArray,
+    val linkUserId: String?,
+    val linkSessionHash: String?,
+    val callbackClaim: String = "",
+)
+private data class SocialPollState(val challenge: String,val status: String,val resultUserId: String?,val message: String?)
 class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable {
     val pool = HikariDataSource(HikariConfig().apply {
         this.jdbcUrl = jdbcUrl; this.username = username; this.password = password
@@ -77,6 +86,9 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
         }
     }
     fun socialIdentity(provider: String,subject: String,email: String?,linkUser: String?): Identity = tx { c ->
+        socialIdentity(c,provider,subject,email,linkUser)
+    }
+    private fun socialIdentity(c: Connection,provider: String,subject: String,email: String?,linkUser: String?): Identity {
         require(provider in setOf("google","vk","yandex") && subject.isNotBlank() && subject.length<=512)
         c.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))").use { it.setString(1,"social:$provider:$subject");it.execute() }
         val existing=c.prepareStatement("SELECT user_id FROM social_identities WHERE provider=? AND subject=?").use { p -> p.setString(1,provider);p.setString(2,subject);p.executeQuery().use { if(it.next()) it.getString(1) else null } }
@@ -95,18 +107,132 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
             c.prepareStatement("INSERT INTO social_identities VALUES (?,?,?::uuid)").use {p->p.setString(1,provider);p.setString(2,subject);p.setString(3,id);p.executeUpdate()}
         }
         val address=c.prepareStatement("SELECT email FROM users WHERE id=?::uuid").use {p->p.setString(1,id);p.executeQuery().use {check(it.next());it.getString(1)}}
-        Identity(id,address,setOf("tracker:read","tracker:write"))
+        return Identity(id,address,setOf("tracker:read","tracker:write"))
     }
     fun newSession(identity: Identity, hours: Long = 24 * 30): Session {
-        val token = secret(); val expiry = Instant.now().plusSeconds(hours * 3600)
-        tx { c ->
-            lockAccount(c, identity.userId)
-            c.prepareStatement("INSERT INTO sessions (token_hash,user_id,scopes,expires_at) VALUES (?,?::uuid,?,?)").use {
-                it.setString(1,digest(token)); it.setString(2,identity.userId); it.setString(3,identity.scopes.sorted().joinToString(" "))
-                it.setTimestamp(4,Timestamp.from(expiry)); it.executeUpdate()
-            }
+        return tx { c -> lockAccount(c,identity.userId);createSession(c,identity,hours) }
+    }
+    private fun createSession(c: Connection,identity: Identity,hours: Long = 24 * 30): Session {
+        val token=secret();val expiry=Instant.now().plusSeconds(hours*3600)
+        c.prepareStatement("INSERT INTO sessions (token_hash,user_id,scopes,expires_at) VALUES (?,?::uuid,?,?)").use {
+            it.setString(1,digest(token));it.setString(2,identity.userId);it.setString(3,identity.scopes.sorted().joinToString(" "));it.setTimestamp(4,Timestamp.from(expiry));it.executeUpdate()
         }
         return Session(token,identity.userId,identity.email,expiry.toString())
+    }
+
+    fun createSocialAttempt(stateHash: String,provider: String,clientChallenge: String,providerVerifierCiphertext: ByteArray,
+                            linkUserId: String?,linkSessionHash: String?) = tx { c ->
+        c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended('habit_tracker.social_attempt_limit',0))").use { it.execute() }
+        c.prepareStatement("DELETE FROM social_login_attempts WHERE expires_at<=now()").use { it.executeUpdate() }
+        val count=c.prepareStatement("SELECT count(*) FROM social_login_attempts WHERE expires_at>now()").use { p->p.executeQuery().use { r->r.next();r.getLong(1) } }
+        require(count<1000) { "Слишком много попыток входа" }
+        c.prepareStatement("""INSERT INTO social_login_attempts
+            (state_hash,provider,client_challenge,provider_verifier_ciphertext,link_user_id,link_session_hash,status,expires_at)
+            VALUES (?,?,?,?,?::uuid,?,'PENDING',now()+INTERVAL '5 minutes')""").use { p ->
+            p.setString(1,stateHash);p.setString(2,provider);p.setString(3,clientChallenge);p.setBytes(4,providerVerifierCiphertext)
+            if(linkUserId==null) p.setNull(5,Types.OTHER) else p.setString(5,linkUserId)
+            p.setString(6,linkSessionHash);p.executeUpdate()
+        }
+    }
+
+    internal fun claimSocialCallback(stateHash: String,provider: String): ClaimedSocialAttempt = tx { c ->
+        val row=c.prepareStatement("""SELECT provider,client_challenge,provider_verifier_ciphertext,link_user_id::text,link_session_hash,status,
+            (callback_lease_until IS NULL OR callback_lease_until<=now())
+            FROM social_login_attempts WHERE state_hash=? AND expires_at>now() FOR UPDATE""").use { p ->
+            p.setString(1,stateHash);p.executeQuery().use { r ->
+                if(!r.next()) throw ApiFailure(400,"Попытка входа не найдена или истекла")
+                ClaimedSocialAttempt(r.getString(1),r.getString(2),r.getBytes(3),r.getString(4),r.getString(5)) to
+                    (r.getString(6) to r.getBoolean(7))
+            }
+        }
+        if(row.first.provider!=provider) throw ApiFailure(400,"Попытка входа не найдена")
+        val canClaim=row.second.first=="PENDING" || (row.second.first=="PROCESSING" && row.second.second)
+        if(!canClaim) throw ApiFailure(409,"Ответ провайдера уже обрабатывается или завершён")
+        val claim=secret()
+        c.prepareStatement("UPDATE social_login_attempts SET status='PROCESSING',callback_lease_until=now()+INTERVAL '90 seconds',callback_claim_hash=? WHERE state_hash=?").use {
+            it.setString(1,digest(claim));it.setString(2,stateHash);check(it.executeUpdate()==1)
+        }
+        row.first.copy(callbackClaim=claim)
+    }
+
+    fun completeSocialCallback(stateHash: String,callbackClaim: String,person: ProviderPerson): Boolean = tx { c ->
+        val linkedUserRow=c.prepareStatement("SELECT link_user_id::text FROM social_login_attempts WHERE state_hash=? AND status='PROCESSING' AND callback_claim_hash=? AND expires_at>now()").use { p ->
+            p.setString(1,stateHash);p.setString(2,digest(callbackClaim));p.executeQuery().use { r -> if(r.next()) Pair(true,r.getString(1)) else Pair(false,null) }
+        }
+        if(!linkedUserRow.first) return@tx false
+        val linkedUser=linkedUserRow.second
+        linkedUser?.let { lockAccount(c,it) }
+        val pending=c.prepareStatement("""SELECT provider,link_user_id::text,link_session_hash FROM social_login_attempts
+            WHERE state_hash=? AND status='PROCESSING' AND callback_claim_hash=? AND expires_at>now() FOR UPDATE""").use { p ->
+            p.setString(1,stateHash);p.setString(2,digest(callbackClaim));p.executeQuery().use { r -> if(r.next()) Triple(r.getString(1),r.getString(2),r.getString(3)) else null }
+        } ?: return@tx false
+        val linkUserId=pending.second
+        val identity=if(linkUserId==null) socialIdentity(c,pending.first,person.subject,person.email,null) else {
+            val valid=c.prepareStatement("""SELECT 1 FROM sessions s WHERE s.token_hash=? AND s.user_id=?::uuid AND s.expires_at>now()
+                AND NOT EXISTS (SELECT 1 FROM oauth_refresh_tokens r WHERE r.access_hash=s.token_hash)""").use { p ->
+                p.setString(1,pending.third);p.setString(2,linkUserId);p.executeQuery().use { it.next() }
+            }
+            if(!valid) {
+                c.prepareStatement("UPDATE social_login_attempts SET status='READY_FAILED',result_message=?,callback_lease_until=NULL,callback_claim_hash=NULL WHERE state_hash=? AND status='PROCESSING' AND callback_claim_hash=?").use {
+                    it.setString(1,"Сессия привязки отозвана. Войди и повтори попытку.");it.setString(2,stateHash);it.setString(3,digest(callbackClaim));it.executeUpdate()
+                }
+                return@tx true
+            }
+            socialIdentity(c,pending.first,person.subject,person.email,linkUserId)
+        }
+        val status=if(linkUserId==null) "READY_SUCCESS" else "READY_LINKED"
+        c.prepareStatement("UPDATE social_login_attempts SET status=?,result_user_id=?::uuid,callback_lease_until=NULL,callback_claim_hash=NULL WHERE state_hash=? AND status='PROCESSING' AND callback_claim_hash=?").use { p ->
+            p.setString(1,status);p.setString(2,identity.userId);p.setString(3,stateHash);p.setString(4,digest(callbackClaim));p.executeUpdate()==1
+        }
+    }
+
+    fun failSocialCallback(stateHash: String,callbackClaim: String,message: String): Boolean = tx { c ->
+        c.prepareStatement("UPDATE social_login_attempts SET status='READY_FAILED',result_message=?,callback_lease_until=NULL,callback_claim_hash=NULL WHERE state_hash=? AND status='PROCESSING' AND callback_claim_hash=? AND expires_at>now()").use { p ->
+            p.setString(1,message.take(300));p.setString(2,stateHash);p.setString(3,digest(callbackClaim));p.executeUpdate()==1
+        }
+    }
+
+    fun pollSocialAttempt(stateHash: String,verifier: String): SocialResult = tx { c ->
+        val owner=c.prepareStatement("SELECT COALESCE(result_user_id,link_user_id)::text FROM social_login_attempts WHERE state_hash=?").use { p ->
+            p.setString(1,stateHash);p.executeQuery().use { r -> if(r.next()) r.getString(1) else null }
+        }
+        if(owner!=null) {
+            try { lockAccount(c,owner) } catch(_: ApiFailure) { throw ApiFailure(410,"Попытка входа больше не действует") }
+        }
+        val row=c.prepareStatement("SELECT client_challenge,status,result_user_id::text,result_message,expires_at>now() FROM social_login_attempts WHERE state_hash=? FOR UPDATE").use { p ->
+            p.setString(1,stateHash);p.executeQuery().use { r ->
+                if(!r.next()) throw ApiFailure(410,"Попытка входа истекла")
+                SocialPollState(r.getString(1),r.getString(2),r.getString(3),r.getString(4)) to r.getBoolean(5)
+            }
+        }
+        if(!row.second) throw ApiFailure(410,"Попытка входа истекла")
+        val state=row.first
+        if(!equalSecrets(challenge(verifier),state.challenge)) throw ApiFailure(403,"Неверный ключ попытки")
+        when(state.status) {
+            "PENDING","PROCESSING" -> SocialResult("WAITING")
+            "READY_SUCCESS","READY_LINKED" -> {
+                val userId=requireNotNull(state.resultUserId)
+                if(owner==null) {
+                    try { lockAccount(c,userId) } catch(_: ApiFailure) { throw ApiFailure(410,"Попытка входа больше не действует") }
+                }
+                val email=c.prepareStatement("SELECT email FROM users WHERE id=?::uuid").use { p -> p.setString(1,userId);p.executeQuery().use { r -> if(r.next()) r.getString(1) else throw ApiFailure(410,"Попытка входа больше не действует") } }
+                val result=if(state.status=="READY_SUCCESS") SocialResult("DONE",createSession(c,Identity(userId,email,setOf("tracker:read","tracker:write")))) else SocialResult("LINKED")
+                c.prepareStatement("DELETE FROM social_login_attempts WHERE state_hash=?").use { it.setString(1,stateHash);it.executeUpdate() }
+                result
+            }
+            "READY_FAILED" -> {
+                val result=SocialResult("FAILED",message=state.message ?: "Не удалось подтвердить вход. Попробуй снова.")
+                c.prepareStatement("DELETE FROM social_login_attempts WHERE state_hash=?").use { it.setString(1,stateHash);it.executeUpdate() }
+                result
+            }
+            else -> throw ApiFailure(410,"Попытка входа истекла")
+        }
+    }
+
+    fun removeSocialAttemptsForAccount(userId: String) = tx { c ->
+        c.prepareStatement("DELETE FROM social_login_attempts WHERE link_user_id=?::uuid OR result_user_id=?::uuid").use { p ->
+            p.setString(1,userId);p.setString(2,userId);p.executeUpdate()
+        }
     }
     fun authenticate(token: String, appSessionOnly: Boolean = false): Identity? = pool.connection.use { c -> c.prepareStatement(
         """SELECT u.id,u.email,s.scopes FROM sessions s JOIN users u ON u.id=s.user_id
