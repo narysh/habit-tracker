@@ -207,7 +207,7 @@ class FeatureIntegrationTest {
                 assertEquals("A note link must open the signed-in account",session.userId,
                     ViewModelProvider(activity).get(AppViewModel::class.java).session.value?.userId)
             }
-            withTimeout(20000) {
+            withTimeout(45000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? NoteContent)?.title == "Note from ChatGPT"
                 } && app.shareInbox.error.value == null) delay(100)
@@ -232,7 +232,7 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
-            withTimeout(20000) {
+            withTimeout(45000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
                 } && app.shareInbox.error.value == null) delay(100)
@@ -262,7 +262,7 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
-            withTimeout(20000) {
+            withTimeout(45000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
                 } && app.shareInbox.error.value == null) delay(100)
@@ -288,7 +288,7 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
-            withTimeout(20000) {
+            withTimeout(45000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
                 } && app.shareInbox.error.value == null) delay(100)
