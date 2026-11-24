@@ -101,16 +101,18 @@ fun escape(value: String): String = value.replace("&","&amp;").replace("<","&lt;
 /** Uses PostgreSQL in the server and an in-memory counter only for isolated unit tests. */
 class LoginThrottle(private val maxAttemptsPerMinute: Int = 20, private val store: Store? = null) {
     private val attempts = mutableMapOf<String,Pair<Instant,Int>>()
-    @Synchronized fun check(key: String) {
+    fun check(key: String) {
         if (store != null) {
             store.checkRateLimit(key, maxAttemptsPerMinute)
             return
         }
-        val now = Instant.now()
-        attempts.entries.removeIf { it.value.first.plusSeconds(60).isBefore(now) }
-        if(attempts.size > 10000) throw ApiFailure(429,"Слишком много запросов")
-        val existing = attempts[key] ?: (now to 0)
-        if(existing.second >= maxAttemptsPerMinute) throw ApiFailure(429,"Подожди минуту перед следующей попыткой")
-        attempts[key] = existing.first to existing.second + 1
+        synchronized(this) {
+            val now = Instant.now()
+            attempts.entries.removeIf { it.value.first.plusSeconds(60).isBefore(now) }
+            if(attempts.size > 10000) throw ApiFailure(429,"Слишком много запросов")
+            val existing = attempts[key] ?: (now to 0)
+            if(existing.second >= maxAttemptsPerMinute) throw ApiFailure(429,"Подожди минуту перед следующей попыткой")
+            attempts[key] = existing.first to existing.second + 1
+        }
     }
 }
