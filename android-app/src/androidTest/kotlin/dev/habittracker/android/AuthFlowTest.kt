@@ -39,7 +39,10 @@ class AuthFlowTest {
             compose.onNodeWithTag("login-email").performTextInput("not-an-email")
             compose.onNodeWithTag("login-password").performTextInput(password)
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
-            compose.waitUntil(10_000) { vm.authError.value=="Некорректный email" }
+            compose.waitUntil(10_000) { vm.busy.value }
+            compose.waitUntil(20_000) { !vm.busy.value }
+            assertNotNull("Registration did not expose an error: ${vm.message.value}",vm.authError.value)
+            assertEquals("Некорректный email",vm.authError.value)
             compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Некорректный email")
 
             compose.onNodeWithTag("login-email").performTextClearance()
@@ -47,7 +50,9 @@ class AuthFlowTest {
             compose.onNodeWithTag("login-password").performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput("short")
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
-            compose.waitUntil(10_000) { vm.authError.value=="Пароль: от 10 до 128 символов" }
+            compose.waitUntil(10_000) { vm.busy.value }
+            compose.waitUntil(20_000) { !vm.busy.value }
+            assertEquals("Пароль: от 10 до 128 символов",vm.authError.value)
             compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Пароль: от 10 до 128 символов")
 
             compose.onNodeWithTag("login-password").performTextClearance()
