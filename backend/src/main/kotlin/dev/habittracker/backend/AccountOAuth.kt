@@ -98,10 +98,14 @@ class AccountOAuth(private val settings: Settings, private val store: Store) {
 fun encode(value: String): String = URLEncoder.encode(value,Charsets.UTF_8)
 fun escape(value: String): String = value.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;")
 
-/** In-memory throttling is intentionally per process; deploy one instance for this demo. */
-class LoginThrottle(private val maxAttemptsPerMinute: Int = 20) {
+/** Uses PostgreSQL in the server and an in-memory counter only for isolated unit tests. */
+class LoginThrottle(private val maxAttemptsPerMinute: Int = 20, private val store: Store? = null) {
     private val attempts = mutableMapOf<String,Pair<Instant,Int>>()
     @Synchronized fun check(key: String) {
+        if (store != null) {
+            store.checkRateLimit(key, maxAttemptsPerMinute)
+            return
+        }
         val now = Instant.now()
         attempts.entries.removeIf { it.value.first.plusSeconds(60).isBefore(now) }
         if(attempts.size > 10000) throw ApiFailure(429,"Слишком много запросов")

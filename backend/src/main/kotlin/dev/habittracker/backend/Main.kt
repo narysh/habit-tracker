@@ -47,19 +47,20 @@ fun main() {
     val store = Store(settings.jdbcUrl,settings.dbUser,settings.dbPassword)
     embeddedServer(Netty,host="0.0.0.0",port=settings.port) { backendModule(settings,store) }.start(wait=true)
 }
-fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store,stateEncryptionKey=settings.socialStateEncryptionKey), loginThrottle: LoginThrottle = LoginThrottle()) {
+fun Application.backendModule(settings: Settings, store: Store,social: SocialLogin = SocialLogin(store,stateEncryptionKey=settings.socialStateEncryptionKey), loginThrottle: LoginThrottle = LoginThrottle(store = store)) {
     val logger = environment.log
     val oauth = AccountOAuth(settings,store)
     val attachmentStorage = settings.createAttachmentStorage()
     val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"),settings.connectionKeyMaterial)
     val throttle = loginThrottle
-    val linkThrottle = LoginThrottle()
+    val linkThrottle = LoginThrottle(store = store)
     monitor.subscribe(ApplicationStopped) { attachmentStorage.close() }
     launch(Dispatchers.IO) {
         while (isActive) {
             try {
                 val queued = store.queueUnlinkedAttachmentFiles()
                 val attempted = store.purgeDeletedAccountFiles(attachmentStorage)
+                store.purgeExpiredRateLimits()
                 if (queued == 64 || attempted == 64) continue
             } catch (_: SQLException) {
                 logger.warn("Unlinked attachment cleanup paused until the database is available")
@@ -138,7 +139,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 call.respond(withContext(Dispatchers.IO) { social.providers(store.authenticate(token, appSessionOnly = settings.publicPlugin)) })
             }
             post("/auth/social/start") {
-                throttle.check(call.rateLimitHost(settings))
+                withContext(Dispatchers.IO) { throttle.check("social:${call.rateLimitHost(settings)}") }
                 val request=call.receive<SocialStart>()
                 val token=call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ").orEmpty()
                 call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token, appSessionOnly = settings.publicPlugin),token) })
@@ -148,12 +149,12 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 call.respond(withContext(Dispatchers.IO) { social.poll(request) })
             }
             post("/auth/register") {
-                throttle.check(call.rateLimitHost(settings))
+                withContext(Dispatchers.IO) { throttle.check("register:${call.rateLimitHost(settings)}") }
                 val credentials = call.receive<Credentials>()
                 call.respond(HttpStatusCode.Created,withContext(Dispatchers.IO) { store.register(credentials) })
             }
             post("/auth/login") {
-                throttle.check(call.rateLimitHost(settings))
+                withContext(Dispatchers.IO) { throttle.check("login:${call.rateLimitHost(settings)}") }
                 val credentials = call.receive<Credentials>()
                 call.respond(withContext(Dispatchers.IO) { store.login(credentials) })
             }
@@ -188,12 +189,12 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 call.respond(HttpStatusCode.NoContent)
             }
             post("/account/chatgpt/preview") {
-                linkThrottle.check(call.attributes[identityKey].userId)
+                withContext(Dispatchers.IO) { linkThrottle.check(call.attributes[identityKey].userId) }
                 call.respond(oauth.previewAppLink(call.receive<ChatGptLinkRequest>().code))
             }
             post("/account/chatgpt/approve") {
                 val identity = call.attributes[identityKey]
-                linkThrottle.check(identity.userId)
+                withContext(Dispatchers.IO) { linkThrottle.check(identity.userId) }
                 val code = call.receive<ChatGptLinkRequest>().code
                 withContext(Dispatchers.IO) { oauth.approveAppLink(code, call.attributes[tokenKey]) }
                 call.respond(HttpStatusCode.NoContent)
@@ -264,7 +265,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             putJsonArray("scopes_supported") { add("tracker:read"); add("tracker:write") }
         }) }
         get("/oauth/authorize") {
-            throttle.check(call.rateLimitHost(settings))
+            withContext(Dispatchers.IO) { throttle.check("oauth-authorize:${call.rateLimitHost(settings)}") }
             val (nonce, request, appCode) = oauth.begin(call.request.queryParameters.entries().associate { it.key to it.value.single() })
             val appLink = if (appCode == null) "" else """
                 <section><h2>Подтвердить в Android</h2>
@@ -291,7 +292,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             )
         }
         post("/oauth/consent") {
-            throttle.check(call.rateLimitHost(settings))
+            withContext(Dispatchers.IO) { throttle.check("oauth-consent:${call.rateLimitHost(settings)}") }
             val form = call.receiveParameters()
             val allow = form["decision"] == "allow"
             val redirect = withContext(Dispatchers.IO) {

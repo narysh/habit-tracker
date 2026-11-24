@@ -39,6 +39,32 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
     } catch (_: java.sql.SQLException) {
         false
     }
+    fun checkRateLimit(key: String, maxAttempts: Int) {
+        require(maxAttempts > 0)
+        val attempts = tx { c ->
+            c.prepareStatement("""INSERT INTO rate_limit_windows(key_hash,window_started_at,attempts)
+                VALUES (?,now(),1)
+                ON CONFLICT(key_hash) DO UPDATE SET
+                  attempts=CASE
+                    WHEN rate_limit_windows.window_started_at <= now()-INTERVAL '60 seconds' THEN 1
+                    WHEN rate_limit_windows.attempts <= ? THEN rate_limit_windows.attempts+1
+                    ELSE rate_limit_windows.attempts
+                  END,
+                  window_started_at=CASE
+                    WHEN rate_limit_windows.window_started_at <= now()-INTERVAL '60 seconds' THEN now()
+                    ELSE rate_limit_windows.window_started_at
+                  END
+                RETURNING attempts""").use { statement ->
+                statement.setString(1, digest(key))
+                statement.setInt(2, maxAttempts)
+                statement.executeQuery().use { result -> check(result.next()); result.getInt(1) }
+            }
+        }
+        if (attempts > maxAttempts) throw ApiFailure(429, "Подожди минуту перед следующей попыткой")
+    }
+    fun purgeExpiredRateLimits(): Int = pool.connection.use { c ->
+        c.prepareStatement("DELETE FROM rate_limit_windows WHERE window_started_at <= now()-INTERVAL '2 minutes'").use { it.executeUpdate() }
+    }
     private fun <T> tx(block: (Connection) -> T): T = pool.connection.use { c ->
         c.autoCommit = false
         try { val result = block(c); c.commit(); result } catch (e: Throwable) { c.rollback(); throw e }

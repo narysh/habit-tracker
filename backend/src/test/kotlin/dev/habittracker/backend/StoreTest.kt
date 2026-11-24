@@ -23,6 +23,21 @@ class StoreTest {
     @AfterAll fun stop() { if(::store.isInitialized) store.close(); if(::postgres.isInitialized) postgres.close() }
     private fun account() = store.register(Credentials("${UUID.randomUUID()}@test.invalid","test-password-123"))
     private fun mutation(content: Content = TaskContent("Проверить"),id: String = UUID.randomUUID().toString(),version: Long = 0) = Mutation(UUID.randomUUID().toString(),id,version,content)
+    @Test fun `rate limits survive backend restart and discard expired windows`() {
+        repeat(3) { store.checkRateLimit("192.0.2.1", 3) }
+        assertFailsWith<ApiFailure> { store.checkRateLimit("192.0.2.1", 3) }
+        Store(postgres.getJdbcUrl("postgres","postgres"), "postgres", "").use { restarted ->
+            assertFailsWith<ApiFailure> { restarted.checkRateLimit("192.0.2.1", 3) }
+            restarted.checkRateLimit("192.0.2.2", 3)
+            postgres.postgresDatabase.connection.use { connection ->
+                connection.prepareStatement("UPDATE rate_limit_windows SET window_started_at=now()-INTERVAL '3 minutes' WHERE key_hash=?").use {
+                    it.setString(1, digest("192.0.2.1")); assertEquals(1, it.executeUpdate())
+                }
+            }
+            assertEquals(1, restarted.purgeExpiredRateLimits())
+            restarted.checkRateLimit("192.0.2.1", 3)
+        }
+    }
     @Test fun `OAuth refresh is single use bound to client and revoked with access token`() {
         val user=account()
         val token=store.issueOAuth(Identity(user.userId,user.email,setOf("tracker:read")),"client","https://resource/mcp")
