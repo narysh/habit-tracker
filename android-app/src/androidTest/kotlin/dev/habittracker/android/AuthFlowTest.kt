@@ -34,7 +34,10 @@ class AuthFlowTest {
             }
             compose.onNodeWithText("Адрес сервера").performTextClearance()
             compose.onNodeWithText("Адрес сервера").performTextInput(TestServer.url)
-            compose.onNodeWithText("Нет аккаунта? Зарегистрироваться").performClick()
+            compose.onNodeWithTag("login-toggle-mode").performScrollTo().performClick()
+            compose.waitUntil(5_000) {
+                compose.onAllNodesWithText("Создай свой аккаунт").fetchSemanticsNodes().isNotEmpty()
+            }
 
             compose.onNodeWithTag("login-email").performTextInput("not-an-email")
             compose.onNodeWithTag("login-password").performTextInput(password)
