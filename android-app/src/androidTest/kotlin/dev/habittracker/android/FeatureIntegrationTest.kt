@@ -99,7 +99,9 @@ class FeatureIntegrationTest {
         if (grantNotificationPermission && Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
             .grantRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)
         val session=Api(TestServer.url).post<Credentials,Session>("/api/v1/auth/register",Credentials("${UUID.randomUUID()}@feature.android.test","test-password-123"))
-        app.preferences.automatic(false);app.preferences.save(session,TestServer.url);return session
+        app.preferences.automatic(false);app.preferences.save(session,TestServer.url)
+        assertEquals("The test session must survive encrypted preference storage",session.userId,app.preferences.current()?.userId)
+        return session
     }
     @Test fun reminderPermissionIsRequestedAfterSavingAndDeferringKeepsTheTask() {
         org.junit.Assume.assumeTrue(Build.VERSION.SDK_INT >= 33)
@@ -195,6 +197,10 @@ class FeatureIntegrationTest {
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
         ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+            it.onActivity { activity ->
+                assertEquals("A note link must open the signed-in account",session.userId,
+                    ViewModelProvider(activity).get(AppViewModel::class.java).session.value?.userId)
+            }
             withTimeout(20000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? NoteContent)?.title == "Note from ChatGPT"
@@ -342,6 +348,10 @@ class FeatureIntegrationTest {
     @Test fun quickEntryCreatesPreviewedTaskAndProjectSearchWorks() {
         val session=account()
         ActivityScenario.launch(MainActivity::class.java).use {
+            it.onActivity { activity ->
+                assertEquals("Quick entry must open the signed-in account",session.userId,
+                    ViewModelProvider(activity).get(AppViewModel::class.java).session.value?.userId)
+            }
             compose.waitUntil(20000){compose.onAllNodesWithText("Быстрый ввод").fetchSemanticsNodes().isNotEmpty()}
             compose.onNodeWithText("Быстрый ввод").performClick()
             compose.onNodeWithText("Что нужно сделать?").performTextInput("Задача из быстрого ввода завтра в 18:00")

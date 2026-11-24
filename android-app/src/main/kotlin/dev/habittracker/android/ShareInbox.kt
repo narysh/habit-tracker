@@ -3,6 +3,7 @@ package dev.habittracker.android
 import android.content.*
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.AtomicFile
 import dev.habittracker.shared.WireJson
 import dev.habittracker.shared.TaskContent
 import dev.habittracker.shared.NoteContent
@@ -33,7 +34,10 @@ import java.time.ZoneId
 class ShareInbox(private val context: Context) {
     private val directory=File(context.filesDir,"incoming").apply {mkdirs()}
     private val manifest=File(directory,"drafts.json")
-    val drafts=MutableStateFlow(runCatching {WireJson.decodeFromString<List<SharedDraft>>(manifest.readText())}.getOrDefault(emptyList()))
+    private val atomicManifest=AtomicFile(manifest)
+    val drafts=MutableStateFlow(runCatching {
+        atomicManifest.openRead().bufferedReader().use { WireJson.decodeFromString<List<SharedDraft>>(it.readText()) }
+    }.getOrDefault(emptyList()))
     val error=MutableStateFlow<String?>(null)
     init {
         val referenced = drafts.value.flatMap { draft -> draft.files }.mapNotNull { file ->
@@ -47,7 +51,17 @@ class ShareInbox(private val context: Context) {
             }
         }
     }
-    private fun store(value: List<SharedDraft>){val temp=File(directory,"drafts.tmp");temp.writeText(WireJson.encodeToString(value));check(temp.renameTo(manifest));drafts.value=value}
+    private fun store(value: List<SharedDraft>) {
+        val stream=atomicManifest.startWrite()
+        try {
+            stream.write(WireJson.encodeToString(value).toByteArray(Charsets.UTF_8))
+            atomicManifest.finishWrite(stream)
+            drafts.value=value
+        } catch (error: Throwable) {
+            atomicManifest.failWrite(stream)
+            throw error
+        }
+    }
     @Synchronized fun receiveDraftLink(link: String) {
         val content = contentDraftFromLink(link, ZoneId.systemDefault().id)
         val id = UUID.nameUUIDFromBytes("habit-tracker-import:${link.trim()}".toByteArray(Charsets.UTF_8)).toString()
