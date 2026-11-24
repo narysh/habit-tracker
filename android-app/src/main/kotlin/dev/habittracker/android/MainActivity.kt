@@ -368,7 +368,7 @@ private fun Content.description(): String = when(this) {
         TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }
         if(advanced) OutlinedTextField(url,{url=it;vm.manualAddress(it)},label={Text("Адрес сервера")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri),modifier=Modifier.fillMaxWidth())
         else Text(if(url.isBlank()) connectionStatus else "Сервер подключён автоматически",style=MaterialTheme.typography.bodySmall)
-        Button(onClick={vm.login(url,email,password,register)},enabled=!busy && url.isNotBlank() && email.isNotBlank() && password.isNotBlank(),modifier=Modifier.fillMaxWidth().height(52.dp)) { Text(if(busy) "Подключение…" else if(register) "Создать аккаунт" else "Войти") }
+        Button(onClick={vm.login(url,email,password,register)},enabled=!busy && url.isNotBlank() && email.isNotBlank() && password.isNotBlank(),modifier=Modifier.fillMaxWidth().height(52.dp).testTag("login-submit")) { Text(if(busy) "Подключение…" else if(register) "Создать аккаунт" else "Войти") }
         TextButton(onClick={register=!register}) {Text(if(register) "Уже есть аккаунт? Войти" else "Нет аккаунта? Зарегистрироваться")}
         Text("В первой версии email используется как логин. Подтверждение почты и восстановление пароля пока недоступны.",style=MaterialTheme.typography.bodySmall)
     }

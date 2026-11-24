@@ -35,7 +35,7 @@ class AuthFlowTest {
 
             compose.onNodeWithTag("login-email").performTextInput("not-an-email")
             compose.onNodeWithTag("login-password").performTextInput(password)
-            compose.onNodeWithText("Создать аккаунт").performClick()
+            compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("Некорректный email").fetchSemanticsNodes().isNotEmpty()
             }
@@ -44,14 +44,14 @@ class AuthFlowTest {
             compose.onNodeWithTag("login-email").performTextInput(email)
             compose.onNodeWithTag("login-password").performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput("short")
-            compose.onNodeWithText("Создать аккаунт").performClick()
+            compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("Пароль: от 10 до 128 символов").fetchSemanticsNodes().isNotEmpty()
             }
 
             compose.onNodeWithTag("login-password").performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput(password)
-            compose.onNodeWithText("Создать аккаунт").performClick()
+            compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(20_000) {
                 compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() && app.preferences.current() != null
             }
