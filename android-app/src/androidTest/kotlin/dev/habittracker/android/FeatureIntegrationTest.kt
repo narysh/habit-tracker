@@ -171,7 +171,7 @@ class FeatureIntegrationTest {
         val link = Uri.parse("habittracker://import/task?title=Draft%20from%20ChatGPT&date=2027-01-20&time=18%3A00")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             withTimeout(20000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? TaskContent)?.title == "Draft from ChatGPT"
@@ -196,7 +196,7 @@ class FeatureIntegrationTest {
         val link = Uri.parse("habittracker://import/note?title=Note%20from%20ChatGPT&text=Keep%20this%20idea")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             it.onActivity { activity ->
                 assertEquals("A note link must open the signed-in account",session.userId,
                     ViewModelProvider(activity).get(AppViewModel::class.java).session.value?.userId)
@@ -225,7 +225,7 @@ class FeatureIntegrationTest {
         val link = Uri.parse("habittracker://import/habit?title=Run%20weekdays%20from%20ChatGPT&days=2%2C4")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             withTimeout(20000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
@@ -240,7 +240,7 @@ class FeatureIntegrationTest {
             withTimeout(30000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
             compose.onNodeWithText(title).assertIsDisplayed()
         }
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             withTimeout(30000) { while (app.shareInbox.drafts.value.isNotEmpty()) delay(100) }
         }
         assertEquals(1, repo.dao.items().count { (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title })
@@ -255,7 +255,7 @@ class FeatureIntegrationTest {
         val link = Uri.parse("habittracker://import/habit?title=Stretch%20three%20times%20from%20ChatGPT&target=3")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             withTimeout(20000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
@@ -281,7 +281,7 @@ class FeatureIntegrationTest {
         val link = Uri.parse("https://narysh.github.io/habit-tracker/task/#kind=habit&title=Habit%20from%20verified%20web%20link&days=2%2C4")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             withTimeout(20000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
@@ -347,7 +347,7 @@ class FeatureIntegrationTest {
     }
     @Test fun quickEntryCreatesPreviewedTaskAndProjectSearchWorks() {
         val session=account()
-        ActivityScenario.launch(MainActivity::class.java).use {
+        ActivityScenario.launch<MainActivity>(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
             it.onActivity { activity ->
                 assertEquals("Quick entry must open the signed-in account",session.userId,
                     ViewModelProvider(activity).get(AppViewModel::class.java).session.value?.userId)
