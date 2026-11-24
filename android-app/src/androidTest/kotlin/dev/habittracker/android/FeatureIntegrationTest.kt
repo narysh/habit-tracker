@@ -23,6 +23,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.time.*
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.util.zip.*
 
@@ -231,13 +232,23 @@ class FeatureIntegrationTest {
         val link = Uri.parse("habittracker://import/habit?title=Run%20weekdays%20from%20ChatGPT&days=2%2C4")
         val intent = Intent(Intent.ACTION_VIEW, link).setPackage(app.packageName)
         assertEquals(MainActivity::class.java.name, intent.resolveActivity(app.packageManager)?.className)
-        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use {
+        val activityViewModel = AtomicReference<AppViewModel>()
+        ActivityScenario.launch<MainActivity>(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)).use { scenario ->
+            scenario.onActivity { activity ->
+                activityViewModel.set(ViewModelProvider(activity).get(AppViewModel::class.java))
+            }
             withTimeout(45000) {
                 while (repo.dao.items().none {
                     (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
-                } && app.shareInbox.error.value == null) delay(100)
+                } && app.shareInbox.error.value == null && activityViewModel.get().message.value == null) delay(100)
             }
-            assertNull(app.shareInbox.error.value)
+            assertNull("Link intake failed: ${app.shareInbox.error.value}", app.shareInbox.error.value)
+            assertTrue(
+                "Habit was not saved; ViewModel message=${activityViewModel.get().message.value}; drafts=${app.shareInbox.drafts.value}",
+                repo.dao.items().any {
+                    (WireJson.decodeFromString<Item>(it.localJson).content as? HabitContent)?.title == title
+                },
+            )
             val habit = repo.dao.items().map { WireJson.decodeFromString<Item>(it.localJson) }
                 .mapNotNull { it.content as? HabitContent }.single { it.title == title }
             assertEquals(HabitMode.WEEKDAYS, habit.mode)
