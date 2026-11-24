@@ -70,6 +70,15 @@ jobs:
             echo 'Release build did not reject a missing signing key.'
             exit 1
           fi
+          set +e
+          no_version=$(HABIT_TRACKER_SIGNING_STORE_FILE="$RUNNER_TEMP/dummy.jks" HABIT_TRACKER_SIGNING_STORE_PASSWORD=test HABIT_TRACKER_SIGNING_KEY_ALIAS=test HABIT_TRACKER_SIGNING_KEY_PASSWORD=test bash gradlew :android-app:assembleRelease --no-daemon -PhabitTrackerOrigin=https://tracker.example.org --dry-run 2>&1)
+          no_version_status=$?
+          set -e
+          if [ "$no_version_status" -eq 0 ] || ! grep -Fq 'A release artifact requires -PhabitTrackerReleaseVersion with a stable version such as 1.0.0' <<< "$no_version"; then
+            printf '%s\n' "$no_version"
+            echo 'Release build did not reject a preview or missing version.'
+            exit 1
+          fi
       - run: bash gradlew :android-app:assembleDebug :android-app:lintDebug
       - name: Start disposable Android emulator
         run: |

@@ -10,10 +10,10 @@
 4. Собери APK для прямой установки или AAB для магазина.
 
 ```powershell
-.\gradlew.bat :android-app:assembleRelease :android-app:bundleRelease -PhabitTrackerOrigin=https://tracker.example.org
+.\gradlew.bat :android-app:assembleRelease :android-app:bundleRelease -PhabitTrackerOrigin=https://tracker.example.org -PhabitTrackerReleaseVersion=1.0.0
 ```
 
-Результаты находятся в `android-app/build/outputs/apk/release` и `android-app/build/outputs/bundle/release`. При пути проекта с кириллицей на Windows Gradle выводит их под `%TEMP%/habit-tracker-<id>/android-app/outputs`.
+Для релизной сборки дополнительно укажи стабильную версию без суффикса preview, например `-PhabitTrackerReleaseVersion=1.0.0`; debug-сборки по умолчанию продолжают использовать версию `0.5.0-preview.9`. Результаты находятся в `android-app/build/outputs/apk/release` и `android-app/build/outputs/bundle/release`. При пути проекта с кириллицей на Windows Gradle выводит их под `%TEMP%/habit-tracker-<id>/android-app/outputs`.
 
 Проверь подпись `apksigner verify --print-certs` и сравни SHA-256 сертификата с сохранённым отпечатком ключа релиза. Перед выдачей проверь чистую установку, регистрацию и обновление поверх предыдущей версии, подписанной тем же ключом. APK из debug-публикаций имеет другой сертификат. Для проверки релиза на устройстве с debug-версией используй отдельный тестовый телефон или эмулятор.
 

@@ -282,6 +282,13 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
     }
     fun revokeOAuth(token: String, clientId: String, resource: String) = tx { c ->
         val hash = digest(token)
+        val userId = c.prepareStatement("""SELECT user_id::text FROM oauth_refresh_tokens
+            WHERE client_id=? AND resource=? AND (access_hash=? OR token_hash=?) LIMIT 1""").use { statement ->
+            statement.setString(1, clientId); statement.setString(2, resource)
+            statement.setString(3, hash); statement.setString(4, hash)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+        }
+        userId?.let { lockAccount(c, it) }
         c.prepareStatement("""DELETE FROM sessions WHERE token_hash IN (
             SELECT access_hash FROM oauth_refresh_tokens WHERE client_id=? AND resource=?
             AND (access_hash=? OR token_hash=?))""").use { statement ->
@@ -479,10 +486,21 @@ class Store(jdbcUrl: String, username: String, password: String) : AutoCloseable
 
     fun revoke(token: String) { tx { c ->
         val hash=digest(token)
-        val access=c.prepareStatement("SELECT access_hash FROM oauth_refresh_tokens WHERE token_hash=?").use { it.setString(1,hash); it.executeQuery().use { r -> if(r.next()) r.getString(1) else null } }
+        val userId=c.prepareStatement("""SELECT user_id::text FROM sessions WHERE token_hash=?
+            UNION SELECT user_id::text FROM oauth_refresh_tokens WHERE token_hash=? OR access_hash=? LIMIT 1""").use {
+            it.setString(1,hash);it.setString(2,hash);it.setString(3,hash)
+            it.executeQuery().use { r -> if(r.next()) r.getString(1) else null }
+        }
+        userId?.let { lockAccount(c,it) }
+        val access=c.prepareStatement("SELECT access_hash FROM oauth_refresh_tokens WHERE token_hash=? OR access_hash=? LIMIT 1").use {
+            it.setString(1,hash);it.setString(2,hash);it.executeQuery().use { r -> if(r.next()) r.getString(1) else null }
+        }
         c.prepareStatement("DELETE FROM sessions WHERE token_hash=? OR token_hash=?").use { it.setString(1,hash); it.setString(2,access ?: hash); it.executeUpdate() }
     } }
-    fun revokeAll(userId: String) { tx { c -> c.prepareStatement("DELETE FROM sessions WHERE user_id=?::uuid").use { it.setString(1,userId); it.executeUpdate() } } }
+    fun revokeAll(userId: String) { tx { c ->
+        lockAccount(c,userId)
+        c.prepareStatement("DELETE FROM sessions WHERE user_id=?::uuid").use { it.setString(1,userId); it.executeUpdate() }
+    } }
     fun changePassword(userId: String, currentToken: String, currentPassword: String, newPassword: String) {
         require(newPassword.length in 10..128) { "Пароль: от 10 до 128 символов" }
         val newHash=Passwords.hash(newPassword)

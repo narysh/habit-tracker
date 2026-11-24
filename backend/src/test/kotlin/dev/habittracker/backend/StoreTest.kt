@@ -188,6 +188,33 @@ class StoreTest {
             executor.shutdownNow()
         }
     }
+    @Test fun `a concurrent refresh cannot survive revoke all sessions`() {
+        val owner=account()
+        val grant=store.issueOAuth(checkNotNull(store.authenticate(owner.token)),"client","https://resource/mcp")
+        val executor=Executors.newFixedThreadPool(2)
+        val start=CountDownLatch(1)
+        try {
+            val refresh=executor.submit<OAuthTokens?> {
+                start.await()
+                try { store.refreshOAuth(grant.refreshToken,"client","https://resource/mcp") }
+                catch (_: ApiFailure) { null }
+            }
+            val revoke=executor.submit {
+                start.await()
+                store.revokeAll(owner.userId)
+            }
+            start.countDown()
+            revoke.get(10,TimeUnit.SECONDS)
+            val rotated=refresh.get(10,TimeUnit.SECONDS)
+            assertNull(store.authenticate(grant.accessToken))
+            rotated?.let {
+                assertNull(store.authenticate(it.accessToken))
+                assertFailsWith<ApiFailure> { store.refreshOAuth(it.refreshToken,"client","https://resource/mcp") }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
     @Test fun `operation replay is persistent and mismatched reuse fails`() {
         val user = account(); val operation = mutation()
         val first = store.mutate(user.userId,operation)

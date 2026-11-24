@@ -8,6 +8,7 @@ plugins {
 }
 
 val backendOrigin = providers.gradleProperty("habitTrackerOrigin").orElse("").get().trim().trimEnd('/')
+val releaseVersion = providers.gradleProperty("habitTrackerReleaseVersion").orNull?.trim()
 if (backendOrigin.isNotEmpty()) {
     val uri = URI(backendOrigin)
     require(uri.scheme == "https" && uri.host != null && uri.userInfo == null && uri.path.isNullOrEmpty() &&
@@ -35,6 +36,9 @@ if (releaseArtifactRequested) {
     }
     require(!temporaryTunnel) { "A release artifact cannot use a temporary tunnel as its backend origin" }
     require(hasReleaseSigning) { "A release artifact requires the persistent HABIT_TRACKER_SIGNING_* key" }
+    require(releaseVersion != null && Regex("(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)").matches(releaseVersion)) {
+        "A release artifact requires -PhabitTrackerReleaseVersion with a stable version such as 1.0.0"
+    }
 }
 
 android {
@@ -45,7 +49,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 13
-        versionName = "0.5.0-preview.9"
+        versionName = releaseVersion ?: "0.5.0-preview.9"
         buildConfigField("String", "BACKEND_ORIGIN", "\"$backendOrigin\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

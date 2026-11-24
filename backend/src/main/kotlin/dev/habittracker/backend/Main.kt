@@ -54,6 +54,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
     val connectionIdentity=ConnectionIdentity(settings.files.resolve(".connection-identity"),settings.connectionKeyMaterial)
     val throttle = loginThrottle
     val linkThrottle = LoginThrottle(store = store)
+    val socialPollThrottle = LoginThrottle(maxAttemptsPerMinute = 40, store = store)
     monitor.subscribe(ApplicationStopped) { attachmentStorage.close() }
     launch(Dispatchers.IO) {
         while (isActive) {
@@ -145,6 +146,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
                 call.respond(withContext(Dispatchers.IO) { social.start(request,store.authenticate(token, appSessionOnly = settings.publicPlugin),token) })
             }
             post("/auth/social/poll") {
+                withContext(Dispatchers.IO) { socialPollThrottle.check("social-poll:${call.rateLimitHost(settings)}") }
                 val request=call.receive<SocialPoll>();require(request.verifier.length in 43..128)
                 call.respond(withContext(Dispatchers.IO) { social.poll(request) })
             }

@@ -181,6 +181,25 @@ class HttpIntegrationTest {
         }
     }
 
+    @Test fun `unauthenticated social polling is rate limited by client ip`() = testApplication {
+        application { backendModule(settings.copy(trustedClientIpHeader="CF-Connecting-IP"),store) }
+        val request=SocialPoll(UUID.randomUUID().toString(),challenge(secret()))
+        repeat(40) {
+            val response=client.post("/api/v1/auth/social/poll") {
+                header("CF-Connecting-IP","198.18.0.77")
+                contentType(ContentType.Application.Json)
+                setBody(WireJson.encodeToString(request))
+            }
+            assertEquals(HttpStatusCode.Gone,response.status)
+        }
+        val limited=client.post("/api/v1/auth/social/poll") {
+            header("CF-Connecting-IP","198.18.0.77")
+            contentType(ContentType.Application.Json)
+            setBody(WireJson.encodeToString(request))
+        }
+        assertEquals(HttpStatusCode.TooManyRequests,limited.status)
+    }
+
     @Test fun `configured proxy header is used and OAuth authorize is throttled`() = testApplication {
         application { backendModule(settings.copy(trustedClientIpHeader="CF-Connecting-IP"),store) }
         repeat(20) { index ->
