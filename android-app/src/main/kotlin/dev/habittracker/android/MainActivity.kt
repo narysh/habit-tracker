@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -353,7 +354,7 @@ private fun Content.description(): String = when(this) {
         Spacer(Modifier.height(42.dp)); Text("Habit Tracker",style=MaterialTheme.typography.headlineLarge,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
         Text("Задачи, заметки и привычки",style=MaterialTheme.typography.titleLarge)
         Text(if(register) "Создай свой аккаунт" else "Войди, чтобы синхронизировать данные")
-        OutlinedTextField(email,{email=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(email,{email=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),singleLine=true,modifier=Modifier.fillMaxWidth().testTag("login-email"))
         OutlinedTextField(
             value=password,
             onValueChange={password=it},
@@ -361,7 +362,7 @@ private fun Content.description(): String = when(this) {
             visualTransformation=if(passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon={TextButton(onClick={passwordVisible=!passwordVisible}) { Text(if(passwordVisible) "Скрыть" else "Показать") }},
             singleLine=true,
-            modifier=Modifier.fillMaxWidth()
+            modifier=Modifier.fillMaxWidth().testTag("login-password")
         )
         SocialButtons(vm,false)
         TextButton(onClick={advanced=!advanced;vm.automaticConnection(!advanced)}) { Text(if(advanced) "Использовать автоматическое подключение" else "Дополнительные настройки") }

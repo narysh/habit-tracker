@@ -33,24 +33,24 @@ class AuthFlowTest {
             compose.onNodeWithText("Адрес сервера").performTextInput(TestServer.url)
             compose.onNodeWithText("Нет аккаунта? Зарегистрироваться").performClick()
 
-            compose.onNodeWithText("Email").performTextInput("not-an-email")
-            compose.onNodeWithText("Пароль — от 10 символов").performTextInput(password)
+            compose.onNodeWithTag("login-email").performTextInput("not-an-email")
+            compose.onNodeWithTag("login-password").performTextInput(password)
             compose.onNodeWithText("Создать аккаунт").performClick()
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("Некорректный email").fetchSemanticsNodes().isNotEmpty()
             }
 
-            compose.onNodeWithText("Email").performTextClearance()
-            compose.onNodeWithText("Email").performTextInput(email)
-            compose.onNodeWithText("Пароль — от 10 символов").performTextClearance()
-            compose.onNodeWithText("Пароль — от 10 символов").performTextInput("short")
+            compose.onNodeWithTag("login-email").performTextClearance()
+            compose.onNodeWithTag("login-email").performTextInput(email)
+            compose.onNodeWithTag("login-password").performTextClearance()
+            compose.onNodeWithTag("login-password").performTextInput("short")
             compose.onNodeWithText("Создать аккаунт").performClick()
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("Пароль: от 10 до 128 символов").fetchSemanticsNodes().isNotEmpty()
             }
 
-            compose.onNodeWithText("Пароль — от 10 символов").performTextClearance()
-            compose.onNodeWithText("Пароль — от 10 символов").performTextInput(password)
+            compose.onNodeWithTag("login-password").performTextClearance()
+            compose.onNodeWithTag("login-password").performTextInput(password)
             compose.onNodeWithText("Создать аккаунт").performClick()
             compose.waitUntil(20_000) {
                 compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() && app.preferences.current() != null
