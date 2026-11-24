@@ -66,7 +66,7 @@ fun Application.backendModule(settings: Settings, store: Store,social: SocialLog
             } catch (_: SQLException) {
                 logger.warn("Unlinked attachment cleanup paused until the database is available")
             }
-            delay(30_000)
+            delay(settings.maintenanceIntervalSeconds * 1000L)
         }
     }
     install(ContentNegotiation) { json(Json(WireJson) { explicitNulls=false; serializersModule=io.modelcontextprotocol.kotlin.sdk.types.McpJson.serializersModule }) }

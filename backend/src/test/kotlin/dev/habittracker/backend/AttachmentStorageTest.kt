@@ -93,7 +93,9 @@ class AttachmentStorageTest {
     @Test fun `trusted client ip header is explicit and restricted to known proxy headers`() {
         val base = mapOf("MCP_CLIENT_SECRET" to "synthetic-secret-".repeat(3), "DB_PASSWORD" to "test-db-password")
         assertNull(Settings.fromEnvironment(base).trustedClientIpHeader)
+        assertEquals(30L, Settings.fromEnvironment(base).maintenanceIntervalSeconds)
         assertEquals("CF-Connecting-IP", Settings.fromEnvironment(base + ("TRUSTED_CLIENT_IP_HEADER" to "CF-Connecting-IP")).trustedClientIpHeader)
+        assertEquals("X-Envoy-External-Address", Settings.fromEnvironment(base + ("TRUSTED_CLIENT_IP_HEADER" to "X-Envoy-External-Address")).trustedClientIpHeader)
         assertFailsWith<IllegalArgumentException> {
             Settings.fromEnvironment(base + ("TRUSTED_CLIENT_IP_HEADER" to "X-Real-IP, X-Forwarded-For"))
         }
@@ -114,11 +116,19 @@ class AttachmentStorageTest {
             "CONNECTION_PUBLIC_KEY_BASE64" to "c3ludGhldGljLXB1YmxpYw==",
         )
         assertTrue(Settings.fromEnvironment(hosted).hostedMode)
+        assertEquals(3_600L, Settings.fromEnvironment(hosted).maintenanceIntervalSeconds)
+        assertEquals(900L, Settings.fromEnvironment(hosted + ("MAINTENANCE_INTERVAL_SECONDS" to "900")).maintenanceIntervalSeconds)
         assertFailsWith<IllegalArgumentException> {
             Settings.fromEnvironment(hosted - "CONNECTION_PUBLIC_KEY_BASE64")
         }
         assertFailsWith<IllegalArgumentException> {
             Settings.fromEnvironment(hosted + ("S3_ENDPOINT" to "http://storage.example.test"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Settings.fromEnvironment(hosted + ("MAINTENANCE_INTERVAL_SECONDS" to "30"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Settings.fromEnvironment(hosted + ("MAINTENANCE_INTERVAL_SECONDS" to "not-a-number"))
         }
     }
 

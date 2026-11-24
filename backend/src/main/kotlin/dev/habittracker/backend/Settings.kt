@@ -19,6 +19,7 @@ data class Settings(
     val trustedClientIpHeader: String? = null,
     val s3Storage: S3StorageConfig? = null,
     val hostedMode: Boolean = false,
+    val maintenanceIntervalSeconds: Long = if (hostedMode) 3_600 else 30,
     val androidPublicUrl: String? = null,
     val connectionKeyMaterial: ConnectionKeyMaterial? = null,
 ) {
@@ -31,13 +32,17 @@ data class Settings(
     override fun toString(): String = "Settings(publicUrl=$publicUrl, jdbcUrl=$jdbcUrl, dbUser=$dbUser, dbPassword=[redacted], " +
         "clientId=$clientId, clientSecret=[redacted], redirects=$redirects, files=$files, port=$port, " +
         "publicPlugin=$publicPlugin, openAiDomainChallenge=[redacted], trustedClientIpHeader=$trustedClientIpHeader, " +
-        "s3Storage=$s3Storage, hostedMode=$hostedMode, androidPublicUrl=$androidPublicUrl, connectionKeyMaterial=$connectionKeyMaterial)"
+        "s3Storage=$s3Storage, hostedMode=$hostedMode, maintenanceIntervalSeconds=$maintenanceIntervalSeconds, " +
+        "androidPublicUrl=$androidPublicUrl, connectionKeyMaterial=$connectionKeyMaterial)"
 
     init {
         val uri = URI(publicUrl)
         require(uri.scheme == "https" || (uri.scheme == "http" && uri.host == "127.0.0.1"))
         require(uri.path.isNullOrEmpty() && uri.userInfo == null && uri.query == null && uri.fragment == null)
         require(clientSecret.length >= 32 && dbPassword.isNotBlank())
+        require(maintenanceIntervalSeconds in (if (hostedMode) 300L..86_400L else 10L..86_400L)) {
+            "MAINTENANCE_INTERVAL_SECONDS must be at least 300 in hosted mode and no more than 86400"
+        }
         if (publicPlugin) {
             require(uri.scheme == "https" && uri.host != null && redirects.isNotEmpty())
             require(redirects.all { URI(it).let { callback -> callback.scheme == "https" && callback.host == "chatgpt.com" && callback.query == null } })
@@ -68,6 +73,7 @@ data class Settings(
         internal fun fromEnvironment(env: Map<String, String>): Settings {
             val explicitJdbc = env["JDBC_URL"]
             val hosted = if (explicitJdbc == null) env["DATABASE_URL"]?.let(::hostedPostgres) else null
+            val hostedMode = env["HOSTED_MODE"]?.toBooleanStrict() ?: false
             val s3Keys = listOf("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")
             val configuredS3 = s3Keys.map { key -> key to env[key]?.takeIf(String::isNotBlank) }.toMap()
             val anyS3Value = configuredS3.values.any { it != null } || env["S3_REGION"]?.isNotBlank() == true
@@ -96,10 +102,15 @@ data class Settings(
                 publicPlugin = env["PUBLIC_CHATGPT_PLUGIN"]?.toBooleanStrict() ?: false,
                 openAiDomainChallenge = env["OPENAI_APPS_CHALLENGE"]?.takeIf(String::isNotEmpty),
                 trustedClientIpHeader = env["TRUSTED_CLIENT_IP_HEADER"]?.takeIf(String::isNotBlank)?.also {
-                    require(it in setOf("X-Real-IP", "CF-Connecting-IP")) { "TRUSTED_CLIENT_IP_HEADER must be X-Real-IP or CF-Connecting-IP" }
+                    require(it in setOf("X-Real-IP", "CF-Connecting-IP", "X-Envoy-External-Address")) {
+                        "TRUSTED_CLIENT_IP_HEADER must be X-Real-IP, CF-Connecting-IP, or X-Envoy-External-Address"
+                    }
                 },
                 s3Storage = s3,
-                hostedMode = env["HOSTED_MODE"]?.toBooleanStrict() ?: false,
+                hostedMode = hostedMode,
+                maintenanceIntervalSeconds = env["MAINTENANCE_INTERVAL_SECONDS"]?.let {
+                    it.toLongOrNull() ?: throw IllegalArgumentException("MAINTENANCE_INTERVAL_SECONDS must be an integer")
+                } ?: if (hostedMode) 3_600 else 30,
                 androidPublicUrl = (env["ANDROID_PUBLIC_URL"] ?: env["RENDER_EXTERNAL_URL"])?.trimEnd('/')?.takeIf(String::isNotEmpty),
                 connectionKeyMaterial = connectionKeyMaterial(env),
             )
