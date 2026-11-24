@@ -35,6 +35,18 @@ class ShareInbox(private val context: Context) {
     private val manifest=File(directory,"drafts.json")
     val drafts=MutableStateFlow(runCatching {WireJson.decodeFromString<List<SharedDraft>>(manifest.readText())}.getOrDefault(emptyList()))
     val error=MutableStateFlow<String?>(null)
+    init {
+        val referenced = drafts.value.flatMap { draft -> draft.files }.mapNotNull { file ->
+            runCatching { File(file.path).canonicalPath }.getOrNull()
+        }.toSet()
+        val abandonedBefore = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        directory.listFiles().orEmpty().forEach { file ->
+            val generatedAttachment = runCatching { UUID.fromString(file.name).toString() == file.name }.getOrDefault(false)
+            if (file.isFile && generatedAttachment && file.lastModified() < abandonedBefore && file.canonicalPath !in referenced) {
+                file.delete()
+            }
+        }
+    }
     private fun store(value: List<SharedDraft>){val temp=File(directory,"drafts.tmp");temp.writeText(WireJson.encodeToString(value));check(temp.renameTo(manifest));drafts.value=value}
     @Synchronized fun receiveDraftLink(link: String) {
         val content = contentDraftFromLink(link, ZoneId.systemDefault().id)

@@ -85,7 +85,11 @@ fun habitDraftFromLink(link: String, zoneId: String, today: LocalDate = LocalDat
     return habit
 }
 
-fun contentDraftFromLink(link: String, zoneId: String): Content {
+fun contentDraftFromLink(
+    link: String,
+    zoneId: String,
+    today: LocalDate = LocalDate.now(ZoneId.of(zoneId)),
+): Content {
     val uri = URI.create(link)
     val isHabit = (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/habit") ||
         (link.startsWith("$TASK_DRAFT_PAGE#") && uri.rawFragment.orEmpty().split('&').any {
@@ -93,7 +97,7 @@ fun contentDraftFromLink(link: String, zoneId: String): Content {
                 URLDecoder.decode(it.substringAfter('=', ""), Charsets.UTF_8.name()) == "habit"
         })
     if (isHabit) {
-        return habitDraftFromLink(link, zoneId)
+        return habitDraftFromLink(link, zoneId, today)
     }
     val isNote = (uri.scheme == "habittracker" && uri.rawAuthority == "import" && uri.rawPath == "/note") ||
         (link.startsWith("$TASK_DRAFT_PAGE#") && uri.rawFragment.orEmpty().split('&').any { it.substringBefore('=') == "kind" && it.substringAfter('=', "") == "note" })

@@ -27,6 +27,22 @@ import java.util.zip.*
 class FeatureIntegrationTest {
     @get:Rule val compose=createEmptyComposeRule()
     private val app get()=ApplicationProvider.getApplicationContext<HabitApplication>()
+    @Test fun shareInboxStartupRemovesOnlyOldUnreferencedAttachmentCopies() {
+        val files=File(app.cacheDir,"share-inbox-${UUID.randomUUID()}").apply {mkdirs()}
+        val isolated=object: android.content.ContextWrapper(app) { override fun getFilesDir()=files }
+        val directory=File(files,"incoming").apply {mkdirs()}
+        val orphan=File(directory,UUID.randomUUID().toString()).apply {writeText("orphan");setLastModified(System.currentTimeMillis()-48L*60*60*1000)}
+        val referenced=File(directory,UUID.randomUUID().toString()).apply {writeText("draft attachment");setLastModified(System.currentTimeMillis()-48L*60*60*1000)}
+        val draft=SharedDraft(UUID.randomUUID().toString(),"Note","",listOf(SharedFile(referenced.absolutePath,"file.txt","text/plain")))
+        File(directory,"drafts.json").writeText(WireJson.encodeToString(listOf(draft)))
+
+        val inbox=ShareInbox(isolated)
+
+        assertFalse("abandoned attachment should be removed",orphan.exists())
+        assertTrue("attachment referenced by a saved draft must remain",referenced.exists())
+        inbox.remove(draft.id)
+        files.deleteRecursively()
+    }
     private fun account(grantNotificationPermission: Boolean = true): Session {
         if (grantNotificationPermission && Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().uiAutomation
             .grantRuntimePermission(app.packageName,Manifest.permission.POST_NOTIFICATIONS)

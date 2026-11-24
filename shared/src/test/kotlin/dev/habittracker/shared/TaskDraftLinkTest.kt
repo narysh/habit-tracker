@@ -73,14 +73,14 @@ class TaskDraftLinkTest {
     @Test fun `verified HTTPS habit links route to the same app draft`() {
         val today = LocalDate.parse("2026-11-23")
         val weekdaysLink = "$TASK_DRAFT_PAGE#kind=habit&title=%D0%91%D0%B5%D0%B3&description=%D0%9A%D0%BE%D1%80%D0%BE%D1%82%D0%BA%D0%BE&days=2%2C4"
-        val weekdays = contentDraftFromLink(weekdaysLink, "Europe/Moscow") as HabitContent
+        val weekdays = contentDraftFromLink(weekdaysLink, "Europe/Moscow", today) as HabitContent
         assertEquals("Бег", weekdays.title)
         assertEquals("Коротко", weekdays.description)
         assertEquals(setOf(2, 4), weekdays.weekdays)
         assertEquals(today.toString(), weekdays.startsOn)
 
         val targetLink = "$TASK_DRAFT_PAGE#kind=habit&title=Stretch&target=3"
-        val target = contentDraftFromLink(targetLink, "UTC") as HabitContent
+        val target = contentDraftFromLink(targetLink, "UTC", today) as HabitContent
         assertEquals(HabitMode.WEEKLY_TARGET, target.mode)
         assertEquals(3, target.targetPerWeek)
         assertEquals(today.toString(), target.startsOn)
