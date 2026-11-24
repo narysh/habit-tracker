@@ -120,6 +120,56 @@ class IntegrationTest {
             compose.onNodeWithText("Задача из Compose").assertIsDisplayed()
         }
     }
+    @Test fun composeCanCreateNoteAndSurviveActivityRecreation() {
+        account()
+        val title="Заметка Compose ${UUID.randomUUID()}"
+        val body="Текст заметки остаётся в локальной базе"
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            compose.waitUntil(15_000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Добавить").performClick()
+            compose.onNodeWithText("Заметку").performClick()
+            compose.onNodeWithText("Название").performTextInput(title)
+            compose.onNodeWithText("Текст").performTextInput(body)
+            compose.onNodeWithText("Сохранить").performClick()
+            compose.waitUntil(10_000) {
+                runBlocking(Dispatchers.IO) {
+                    app.repository()!!.dao.items().any { row ->
+                        val note=WireJson.decodeFromString<Item>(row.localJson).content as? NoteContent
+                        note?.title==title && note.text==body
+                    }
+                }
+            }
+            compose.onNodeWithContentDescription("Заметки",useUnmergedTree=true).performClick()
+            compose.waitUntil(10_000) { compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+            scenario.recreate()
+            compose.waitUntil(15_000) { compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(title).assertIsDisplayed()
+        }
+    }
+    @Test fun composeCanCreateHabitAndSurviveActivityRecreation() {
+        account()
+        val title="Привычка Compose ${UUID.randomUUID()}"
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            compose.waitUntil(15_000) { compose.onAllNodesWithText("Сегодня").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithContentDescription("Добавить").performClick()
+            compose.onNodeWithText("Привычку").performClick()
+            compose.onNodeWithText("Название").performTextInput(title)
+            compose.onNodeWithText("Сохранить").performClick()
+            compose.waitUntil(10_000) {
+                runBlocking(Dispatchers.IO) {
+                    app.repository()!!.dao.items().any { row ->
+                        val habit=WireJson.decodeFromString<Item>(row.localJson).content as? HabitContent
+                        habit?.title==title && habit.mode==HabitMode.WEEKDAYS && habit.weekdays==setOf(1,2,3,4,5,6,7)
+                    }
+                }
+            }
+            compose.onNodeWithContentDescription("Привычки",useUnmergedTree=true).performClick()
+            compose.waitUntil(10_000) { compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+            scenario.recreate()
+            compose.waitUntil(15_000) { compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(title).assertIsDisplayed()
+        }
+    }
     @Test fun todaySeparatesUndatedTasksFromDeadlineTasks() {
         account()
         val repo=app.repository()!!

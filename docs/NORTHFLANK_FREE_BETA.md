@@ -26,7 +26,7 @@ pwsh -File .\scripts\New-HostedConnectionKeys.ps1
 - Dockerfile: `backend/Dockerfile`.
 - Build context: корень репозитория (`.`).
 - Публичный HTTP-порт: `8081`.
-- Readiness check: `/readyz`.
+- Проверка доступности контейнера: HTTP GET `/health` (этот адрес не обращается к Neon или S3).
 - Масштаб: одна реплика и минимальный доступный план. Не увеличивай ресурсы и не создавай второй сервис без проверки Usage.
 
 Публичный порт получает автоматически созданный HTTPS-домен `code.run` с TLS. Скопируй точный origin из **Networking**; формат имени документация задаёт как `[port]--[service]--[random].code.run`. Не составляй адрес вручную. [Настройка публичных портов](https://northflank.com/docs/v1/application/network/configure-ports)
@@ -61,7 +61,9 @@ SOCIAL_CALLBACK_BASE=https://narysh.github.io/habit-tracker
 
 Northflank ставит `X-Envoy-External-Address` на публичных HTTP-запросах и заменяет переданное клиентом значение; это позволяет ограничивать попытки входа по реальному IP. Не используй `X-Forwarded-For`: в нём может быть переданный клиентом список адресов. [Сетевые заголовки Northflank](https://northflank.com/docs/v1/application/network/networking-on-northflank)
 
-`MAINTENANCE_INTERVAL_SECONDS=3600` нужен для бесплатного Neon: фоновые задачи чистки не должны опрашивать базу каждые 30 секунд и мешать ей приостанавливаться. В hosted-режиме backend использует часовой интервал по умолчанию; очередь с большой пачкой удаления дочищается сразу. Удалённые вложения без активных ссылок могут оставаться в хранилище до часа.
+Не назначай `/readyz` постоянным Northflank readiness probe: он проверяет PostgreSQL и S3, а readiness probe повторяется на протяжении всей работы контейнера. Это будет регулярно будить Neon. Проверь `/readyz` вручную после запуска или из локальной проверки. Постоянный liveness probe используй только на `/health`; при этом сбой Neon не должен перезапускать backend. [Как работают health probes Northflank](https://northflank.com/docs/v1/application/observe/configure-health-checks)
+
+`MAINTENANCE_INTERVAL_SECONDS=3600` нужен для бесплатного Neon: фоновые задачи чистки не должны опрашивать базу каждые 30 секунд и мешать ей приостанавливаться. В hosted-режиме backend использует часовой интервал по умолчанию; очередь с большой пачкой удаления дочищается сразу. Удалённые вложения обычно очищаются в течение часа после синхронизации, но при сбое S3 — позже.
 
 Переменные Google и Яндекса добавляй только после создания OAuth-клиентов с точными callback URL из [инструкции по соцвходу](SOCIAL_AUTH.md). Вход по email и паролю работает без них. VK требует отдельного приложения и не считается настроенным.
 
