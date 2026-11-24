@@ -147,6 +147,40 @@ class HttpIntegrationTest {
         }
     }
 
+    @Test fun `default login throttle is shared by independent backend instances`() {
+        val proxied = settings.copy(trustedClientIpHeader="CF-Connecting-IP")
+        val address = "203.0.113.239"
+        testApplication {
+            application { backendModule(proxied,store) }
+            repeat(20) {
+                val response=client.post("/api/v1/auth/login") {
+                    header("CF-Connecting-IP",address)
+                    contentType(ContentType.Application.Json)
+                    setBody("{}")
+                }
+                assertEquals(HttpStatusCode.BadRequest,response.status)
+            }
+            val limited=client.post("/api/v1/auth/login") {
+                header("CF-Connecting-IP",address)
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            assertEquals(HttpStatusCode.TooManyRequests,limited.status)
+        }
+
+        Store(pg.getJdbcUrl("postgres","postgres"),"postgres","").use { restarted ->
+            testApplication {
+                application { backendModule(proxied,restarted) }
+                val limited=client.post("/api/v1/auth/login") {
+                    header("CF-Connecting-IP",address)
+                    contentType(ContentType.Application.Json)
+                    setBody("{}")
+                }
+                assertEquals(HttpStatusCode.TooManyRequests,limited.status)
+            }
+        }
+    }
+
     @Test fun `configured proxy header is used and OAuth authorize is throttled`() = testApplication {
         application { backendModule(settings.copy(trustedClientIpHeader="CF-Connecting-IP"),store) }
         repeat(20) { index ->
