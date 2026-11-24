@@ -39,8 +39,8 @@ class AuthFlowTest {
                 compose.onAllNodesWithText("Создай свой аккаунт").fetchSemanticsNodes().isNotEmpty()
             }
 
-            compose.onNodeWithTag("login-email").performTextInput("not-an-email")
-            compose.onNodeWithTag("login-password").performTextInput(password)
+            compose.onNodeWithTag("login-email").performScrollTo().performTextInput("not-an-email")
+            compose.onNodeWithTag("login-password").performScrollTo().performTextInput(password)
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(10_000) { vm.busy.value }
             compose.waitUntil(20_000) { !vm.busy.value }
@@ -48,9 +48,9 @@ class AuthFlowTest {
             assertEquals("Некорректный email",vm.authError.value)
             compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Некорректный email")
 
-            compose.onNodeWithTag("login-email").performTextClearance()
+            compose.onNodeWithTag("login-email").performScrollTo().performTextClearance()
             compose.onNodeWithTag("login-email").performTextInput(email)
-            compose.onNodeWithTag("login-password").performTextClearance()
+            compose.onNodeWithTag("login-password").performScrollTo().performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput("short")
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(10_000) { vm.busy.value }
@@ -58,7 +58,7 @@ class AuthFlowTest {
             assertEquals("Пароль: от 10 до 128 символов",vm.authError.value)
             compose.onNodeWithTag("auth-error").performScrollTo().assertTextEquals("Пароль: от 10 до 128 символов")
 
-            compose.onNodeWithTag("login-password").performTextClearance()
+            compose.onNodeWithTag("login-password").performScrollTo().performTextClearance()
             compose.onNodeWithTag("login-password").performTextInput(password)
             compose.onNodeWithTag("login-submit").performScrollTo().performClick()
             compose.waitUntil(20_000) {
